@@ -311,7 +311,7 @@ describe("a provider that takes one system prompt", () => {
     }) as typeof fetch;
     try {
       const model = new ChatGoogleGenerativeAI({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.5-flash-lite",
         apiKey: "test",
       });
 

@@ -41,7 +41,7 @@ describe("the provider registry", () => {
   test("each provider has a model to run when none was configured", () => {
     expect(MODEL_PROVIDERS.openai.defaultModel).toBe("gpt-5.5");
     expect(MODEL_PROVIDERS.anthropic.defaultModel).toBe("claude-sonnet-4-5");
-    expect(MODEL_PROVIDERS.google.defaultModel).toBe("gemini-2.5-flash");
+    expect(MODEL_PROVIDERS.google.defaultModel).toBe("gemini-3.5-flash-lite");
   });
 
   test("each provider has a name to be refused by", () => {
@@ -142,7 +142,7 @@ describe("which model this Bot was told to use", () => {
     expect(configuredModel("openai", "")).toBe("gpt-5.5");
     expect(configuredModel("openai", "   ")).toBe("gpt-5.5");
     expect(configuredModel("anthropic", undefined)).toBe("claude-sonnet-4-5");
-    expect(configuredModel("google", "")).toBe("gemini-2.5-flash");
+    expect(configuredModel("google", "")).toBe("gemini-3.5-flash-lite");
   });
 
   /** An unknown provider has no default of its own; the Bot refuses it on its own a line later. */
@@ -191,7 +191,7 @@ describe("whether a model has to be driven through the Responses API", () => {
 
   test("other providers' models are not OpenAI's problem", () => {
     expect(requiresResponsesApi("claude-sonnet-4-5")).toBe(false);
-    expect(requiresResponsesApi("gemini-2.5-flash")).toBe(false);
+    expect(requiresResponsesApi("gemini-3.5-flash-lite")).toBe(false);
   });
 });
 
@@ -243,7 +243,7 @@ describe("what a Bot runs from the spec file", () => {
     ).toEqual({ provider: "anthropic", model: "claude-haiku" });
     expect(
       botSettings("agent-langgraph", { BOT_PROVIDER: "  Google " }),
-    ).toEqual({ provider: "google", model: "gemini-2.5-flash" });
+    ).toEqual({ provider: "google", model: "gemini-3.5-flash-lite" });
   });
 
   /**

@@ -74,7 +74,7 @@ def _google_response(content):
             "candidatesTokenCount": 1,
             "totalTokenCount": 2,
         },
-        "modelVersion": "gemini-2.5-flash",
+        "modelVersion": "gemini-3.5-flash-lite",
     }
 
 
@@ -477,8 +477,8 @@ async def test_openai_keeps_a_skill_turn_beside_the_message_it_was_picked_for(
         ("google", ""),
         ("google_genai", None),
         ("google_genai", ""),
-        ("google", "gemini-2.5-flash"),
-        ("openai", "google_genai:gemini-2.5-flash"),
+        ("google", "gemini-3.5-flash-lite"),
+        ("openai", "google_genai:gemini-3.5-flash-lite"),
     ],
 )
 async def test_google_provider_reaches_google_genai_boundary(
@@ -499,7 +499,7 @@ async def test_google_provider_reaches_google_genai_boundary(
     assert result["messages"][0].content == "google loopback proof"
     assert captured == [
         {
-            "path": "/v1beta/models/gemini-2.5-flash:generateContent",
+            "path": "/v1beta/models/gemini-3.5-flash-lite:generateContent",
             "x_goog_api_key_present": True,
             "body": {
                 "contents": [

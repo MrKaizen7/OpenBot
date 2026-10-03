@@ -256,35 +256,36 @@ services:
       retries: 5
 
   # The built-in Bot is an AG-UI endpoint registered the same way as a customer-provided Bot.
-  agent-bot:
-    build:
-      context: .
-      dockerfile: agent-bot/Dockerfile
-    # Published by a release; see migrate above for what pull_policy decides.
-    image: ${BOT_IMAGE:-openbot-agent-bot:latest}
-    pull_policy: ${IMAGE_PULL_POLICY:-build}
-    ports:
-      # Loopback, not every interface. The token is the boundary; this means an attacker needs to be
-      # on the machine before they can even try it. Nothing legitimate reaches a Bot from another
-      # host: the server calls it over localhost, and other containers use the compose network.
-      - "127.0.0.1:${BOT_PORT:-4200}:4200"
-      - "[::1]:${BOT_PORT:-4200}:4200"
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      # Server sends this on every call to the managed Bot. It refuses to start without it.
-      MANAGED_AGENT_TOKEN: ${MANAGED_AGENT_TOKEN:-}
-      # Unset means OpenAI. Set, it is any endpoint speaking the same API, and BOT_MODEL is sent
-      # to it verbatim.
-      OPENAI_BASE_URL: ${OPENAI_CONTAINER_BASE_URL:-${OPENAI_BASE_URL:-}}
-      # gpt-5.5, not the deployment default: this Bot writes /v1/chat/completions by hand, and
-      # gpt-5.6-* rejects function tools there unless reasoning is turned off. Its own variable, so
-      # a BOT_MODEL set for the framework Bot cannot silently take its tools away.
-      BOT_MODEL: ${AGENT_BOT_MODEL:-gpt-5.5}
-    healthcheck:
-      test: ["CMD-SHELL", "bun -e \"await fetch('http://localhost:4200/health')\""]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  #comented out bc apparently the agent_langgrph is the 'normal/full/to be used' one
+#  agent-bot:
+#    build:
+#      context: .
+#      dockerfile: agent-bot/Dockerfile
+#    # Published by a release; see migrate above for what pull_policy decides.
+#    image: ${BOT_IMAGE:-openbot-agent-bot:latest}
+#    pull_policy: ${IMAGE_PULL_POLICY:-build}
+#    ports:
+#      # Loopback, not every interface. The token is the boundary; this means an attacker needs to be
+#      # on the machine before they can even try it. Nothing legitimate reaches a Bot from another
+#      # host: the server calls it over localhost, and other containers use the compose network.
+#      - "127.0.0.1:${BOT_PORT:-4200}:4200"
+#      - "[::1]:${BOT_PORT:-4200}:4200"
+#    environment:
+#      OPENAI_API_KEY: ${OPENAI_API_KEY}
+#      # Server sends this on every call to the managed Bot. It refuses to start without it.
+#      MANAGED_AGENT_TOKEN: ${MANAGED_AGENT_TOKEN:-}
+#      # Unset means OpenAI. Set, it is any endpoint speaking the same API, and BOT_MODEL is sent
+#      # to it verbatim.
+#      OPENAI_BASE_URL: ${OPENAI_CONTAINER_BASE_URL:-${OPENAI_BASE_URL:-}}
+#      # gpt-5.5, not the deployment default: this Bot writes /v1/chat/completions by hand, and
+#      # gpt-5.6-* rejects function tools there unless reasoning is turned off. Its own variable, so
+#      # a BOT_MODEL set for the framework Bot cannot silently take its tools away.
+#      BOT_MODEL: ${AGENT_BOT_MODEL:-gpt-5.5}
+#    healthcheck:
+#      test: ["CMD-SHELL", "bun -e \"await fetch('http://localhost:4200/health')\""]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 5
 
   # The harness somebody picked during setup, whichever one it is.
   #

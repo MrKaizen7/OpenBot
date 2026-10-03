@@ -1,0 +1,34 @@
+ Image openbot-agent-bot:latest Pulling 
+ Image ghcr.io/spiffe/spire-server:1.15.1 Pulling 
+ Image openbot-supervisor:latest Pulling 
+ Image openbot-server:latest Pulling 
+ Image openbot-agent-computer:latest Pulling 
+ Image openbot-agent-langgraph:latest Pulling 
+ Image ghcr.io/spiffe/spire-agent:1.15.1 Pulling 
+ Image busybox:1.37 Pulling 
+ Image pgvector/pgvector:pg17 Pulling 
+ Image openbot-supervisor:latest pull access denied for openbot-supervisor, repository does not exist or may require 'docker login' 
+ Image openbot-agent-langgraph:latest pull access denied for openbot-agent-langgraph, repository does not exist or may require 'docker login' 
+ Image openbot-server:latest pull access denied for openbot-server, repository does not exist or may require 'docker login' 
+ Image openbot-agent-computer:latest pull access denied for openbot-agent-computer, repository does not exist or may require 'docker login' 
+ Image openbot-agent-bot:latest pull access denied for openbot-agent-bot, repository does not exist or may require 'docker login' 
+ 3392d6b254b4 Pulling fs layer 0B
+ 039e6f9f9752 Pulling fs layer 0B
+ 3d4e001e01a2 Pulling fs layer 0B
+ 44438d8012af Pulling fs layer 0B
+ 740ea3feff0f Pulling fs layer 0B
+ b70609756d71 Pulling fs layer 0B
+ 5ac7c444edb0 Pulling fs layer 0B
+ 9ef6b0a1be9e Pulling fs layer 0B
+ 11ec1b6ae2a0 Pulling fs layer 0B
+ f67c9bdd808a Pulling fs layer 0B
+ 9524156efd7a Pulling fs layer 0B
+ d7b627e06eac Pulling fs layer 0B
+ f495088ca134 Pulling fs layer 0B
+ 1e12f8d900eb Pulling fs layer 0B
+ ef21471f3a2b Pulling fs layer 0B
+ 62ca04624b47 Pulling fs layer 0B
+ 8cb2f3b54f01 Pulling fs layer 0B
+ f4c8a5a893b6 Pulling fs layer 0B
+ Image busybox:1.37 Pulled 
+ Image ghcr.io/spiffe/spire-agent:1.15.1 Pulled 
