@@ -44,6 +44,32 @@ describe("the configured browser runtime", () => {
     },
   );
 
+  test("local Chrome can bind only to an explicit private WSL address", () => {
+    expect(
+      browserRuntimeFromEnv(
+        {
+          COMPUTER_BROWSER_BACKEND: "local-chrome",
+          COMPUTER_BIND_HOST: "172.17.176.1",
+        },
+        "win32",
+      ).hostname,
+    ).toBe("172.17.176.1");
+    for (const host of ["0.0.0.0", "192.0.2.1", "localhost"]) {
+      expect(() =>
+        browserRuntimeFromEnv(
+          {
+            COMPUTER_BROWSER_BACKEND: "local-chrome",
+            COMPUTER_BIND_HOST: host,
+          },
+          "win32",
+        ),
+      ).toThrow("private IPv4");
+    }
+    expect(() =>
+      browserRuntimeFromEnv({ COMPUTER_BIND_HOST: "172.17.176.1" }, "win32"),
+    ).toThrow("only supported with COMPUTER_BROWSER_BACKEND=local-chrome");
+  });
+
   test("rejects unknown backends and incompatible local modes", () => {
     expect(() =>
       browserRuntimeFromEnv({ COMPUTER_BROWSER_BACKEND: "cdp" }),

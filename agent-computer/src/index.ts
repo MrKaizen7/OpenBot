@@ -1430,7 +1430,9 @@ function fileStatus(error: unknown): 400 | 403 | 500 {
   return 500;
 }
 
-console.info(`agent-computer listening on http://127.0.0.1:${PORT}`);
+console.info(
+  `agent-computer listening on http://${RUNTIME.hostname ?? "0.0.0.0"}:${PORT}`,
+);
 
 /**
  * Hand the profile back before dying.

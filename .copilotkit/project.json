@@ -2,5 +2,6 @@
   "projectId": "6833",
   "projectSlug": "main",
   "clerkOrgId": "org_3K5QJSCqrqjgqI2he8kcymPTdPO",
-  "telemetryBindingId": "20eea093-3193-4d91-a4da-f67f60679dc8"
+  "telemetryBindingId": "20eea093-3193-4d91-a4da-f67f60679dc8",
+  "apiKeyDirectory": "."
 }

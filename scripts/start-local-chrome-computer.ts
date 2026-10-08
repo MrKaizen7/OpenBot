@@ -115,18 +115,21 @@ export async function requireInstalledChrome(
   );
 }
 
-export async function requireAvailablePort(port: number): Promise<void> {
+export async function requireAvailablePort(
+  port: number,
+  hostname = "127.0.0.1",
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const probe = createServer();
     probe.once("error", (error) =>
       reject(
         new Error(
-          `Cannot listen on 127.0.0.1:${port}; free that port or set PORT explicitly.`,
+          `Cannot listen on ${hostname}:${port}; free that address/port or set PORT explicitly.`,
           { cause: error },
         ),
       ),
     );
-    probe.listen(port, "127.0.0.1", () =>
+    probe.listen(port, hostname, () =>
       probe.close((error) => (error ? reject(error) : resolve())),
     );
   });
@@ -135,14 +138,15 @@ export async function requireAvailablePort(port: number): Promise<void> {
 async function main(): Promise<void> {
   const config = localChromeConfiguration(process.env);
   await requireInstalledChrome(config.env);
-  await requireAvailablePort(config.port);
+  const bindHost = config.env.COMPUTER_BIND_HOST?.trim() || "127.0.0.1";
+  await requireAvailablePort(config.port, bindHost);
   await mkdir(config.root, { recursive: true, mode: 0o700 });
   for (const directory of [config.env.PROFILES_DIR, config.env.WORKSPACE_DIR]) {
     if (directory) await mkdir(directory, { recursive: true, mode: 0o700 });
   }
   const computerDirectory = join(import.meta.dir, "..", "agent-computer");
   console.info(
-    `Starting local Chrome computer at http://127.0.0.1:${config.port}; data: ${config.root}`,
+    `Starting local Chrome computer at http://${bindHost}:${config.port}; data: ${config.root}`,
   );
   const child = Bun.spawn([process.execPath, "--no-env-file", "src/index.ts"], {
     cwd: computerDirectory,

@@ -542,6 +542,49 @@ selectors, and restart the API. Unset `COMPUTER_BROWSER_BACKEND` (or set `manage
 computer process; choose `headless` or `headed` as before. Local Chrome profiles remain in the local
 data root, separate from managed computer volumes.
 
+#### Connecting a Windows local Chrome helper to an API in WSL2 (NAT)
+
+The Windows Firewall on some machines blocks inbound connections from WSL even when a local allow
+rule is present. Avoid exposing the helper on the WSL virtual-switch or LAN interface: keep it bound
+to Windows loopback and use a loopback TCP relay in WSL plus an outbound Windows tunnel client.
+The relay and tunnel use Python and Node already present in the development setup; no package install
+or firewall exception is required.
+
+1. In WSL, start the relay (it listens only on WSL loopback):
+
+  ```sh
+  python3 scripts/local-chrome-wsl-relay.py
+  ```
+
+2. In a Windows PowerShell terminal at the repository root, start/restart the helper on Windows
+  loopback and start the outbound connector. Keep both running:
+
+  ```powershell
+  $env:COMPUTER_BIND_HOST = '127.0.0.1'
+  $env:PORT = '4101'
+  bun --env-file=.env scripts/start-local-chrome-computer.ts
+  ```
+
+  In a second Windows PowerShell terminal:
+
+  ```powershell
+  node scripts/local-chrome-windows-tunnel.mjs
+  ```
+
+3. Set `AGENT_COMPUTER_URL=http://127.0.0.1:4102` in `.env` and restart only the WSL API process.
+  Windows localhost forwarding lets the Windows tunnel connect out to the WSL relay, which pairs
+  that socket with API requests and forwards bytes to the helper. The API still supplies the
+  existing `COMPUTER_TOKEN` and Bot id; both relay sockets bind only to loopback. This bridge is
+  temporary and in-memory: if either relay or tunnel stops, computer requests fail until both are
+  started again.
+
+The OpenBot helper still uses its dedicated profile per Bot, not the user's everyday Chrome profile.
+No Docker containers need restarting for this local development connection.
+
+Restart only the API process in WSL after changing `.env`; leave PostgreSQL, the supervisor and the
+managed `agent-computer` container alone. The supervisor may remain running, but the API uses the
+shared helper URL when both `COMPUTER_SUPERVISOR_URL` and `COMPUTER_SANDBOX_NAMESPACE` are empty.
+
 `agent-computer` also reads:
 
 - `ACTION_TIMEOUT_MS`

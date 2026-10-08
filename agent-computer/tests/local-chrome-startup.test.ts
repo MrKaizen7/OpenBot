@@ -35,6 +35,18 @@ describe("starting the local computer", () => {
     expect(config.env.COMPUTER_TOKEN).toBe("test-token");
   });
 
+  test("allows explicitly binding the helper to a private WSL interface", () => {
+    const config = localChromeConfiguration(
+      {
+        COMPUTER_TOKEN: "test-token",
+        COMPUTER_BIND_HOST: "172.17.176.1",
+      },
+      "win32",
+      "C:\\Users\\Operator",
+    );
+    expect(config.env.COMPUTER_BIND_HOST).toBe("172.17.176.1");
+  });
+
   test("uses platform user data roots", () => {
     const env = { COMPUTER_TOKEN: "test-token" };
     expect(
@@ -106,7 +118,7 @@ describe("starting the local computer", () => {
     );
   });
 
-  test("occupied loopback port fails instead of choosing another port", async () => {
+  test("occupied bind address and port fail instead of choosing another", async () => {
     const server = createServer();
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -116,7 +128,9 @@ describe("starting the local computer", () => {
       const address = server.address();
       if (!address || typeof address === "string")
         throw new Error("Expected TCP listener");
-      await expect(requireAvailablePort(address.port)).rejects.toThrow(
+      await expect(
+        requireAvailablePort(address.port, "127.0.0.1"),
+      ).rejects.toThrow(
         `Cannot listen on 127.0.0.1:${address.port}`,
       );
     } finally {

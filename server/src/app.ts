@@ -1110,17 +1110,6 @@ export function createApp(
       return context.json({ accepted: true }, 202);
     });
   }
-  // The CopilotKit runtime, behind the same session guard as every other API route. Mounted last so
-  // its own routing under /api/copilotkit cannot shadow an OpenBot route declared above.
-  if (copilotHandler) {
-    // Mounted at the ROOT with the handler carrying its own basePath. Mounting it at
-    // "/api/copilotkit" as well double-prefixes it: Hono strips the prefix before the handler sees
-    // the path, so every route lands at /api/copilotkit/api/copilotkit/* and /info 404s. The browser
-    // reports that as "Runtime info request failed with status 404" and every run fails before it
-    // starts, with nothing at all in the server log.
-    app.route("/", copilotHandler);
-  }
-
   /**
    * May this person act as this Bot?
    *
@@ -1548,6 +1537,15 @@ export function createApp(
         ),
       ),
     );
+  }
+
+  // The CopilotKit runtime has a root-level catch-all, so mount it only after every OpenBot API
+  // route. If registered earlier, its 404 response can shadow routes mounted later (including
+  // computer control), even though the runtime's own endpoints continue to work.
+  if (copilotHandler) {
+    // The handler carries its own `/api/copilotkit` base path. Mounting it at that prefix too
+    // double-prefixes the routes and breaks runtime info and agent runs.
+    app.route("/", copilotHandler);
   }
 
   /*
