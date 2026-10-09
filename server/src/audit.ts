@@ -70,6 +70,10 @@ export const auditEventTypes = [
    * routing decision is a fact about where a conversation went, not a copy of what was said.
    */
   "channel.routed",
+  "delivery.received",
+  "delivery.sent",
+  "delivery.opted_out",
+  "delivery.failed",
   /**
    * A channel was removed from every member's roster, and by whom.
    *
@@ -230,6 +234,15 @@ export const auditEventTypes = [
    * while the grant at Google stood untouched.
    */
   "mcp.account_disconnected",
+  // An administrator switched a brokered app between each person's account and one shared account.
+  "mcp.account_mode_changed",
+  // A Bot's use of a Shared app needs an administrator's approval: filed by a refused call or by the
+  // Bot's owner.
+  "shared_use.requested",
+  // An administrator answered a request to use a Shared app through a Bot.
+  "shared_use.approved",
+  // An administrator answered a request to use a Shared app through a Bot.
+  "shared_use.declined",
   // Every action a Bot takes on its computer, allowed or refused. Both, always: a trail that records
   // only what was permitted cannot answer whether the Bot tried.
   "computer.action_allowed",
@@ -252,11 +265,23 @@ export const auditEventTypes = [
   // which field it went in; the value is on a path this trail is not on.
   "computer.secret_requested",
   "computer.secret_supplied",
+  // A Bot asking its owner to sign it in to a website, and how that ended. Never the username, the
+  // password or a code: the row says which site, which request and whether a saved login was used.
+  "computer.sign_in_requested",
+  "computer.sign_in_completed",
+  "computer.sign_in_failed",
+  "computer.sign_in_cancelled",
+  // A login saved to, or removed from, a person's Passwords. The site and username id, never the value.
+  "password.saved",
+  "password.deleted",
   // The computer itself being stopped or wiped. `reset` destroys every login the Bot had, which is
   // both the recovery path and the most consequential button on the admin page, so who pressed it and
   // when is exactly the sort of thing an investigator needs and nothing else records.
   "computer.stopped",
   "computer.reset",
+  // A computer moved onto the current image. Its files and sign-ins are kept, but a running one is
+  // restarted, which interrupts whatever it was doing, so who asked is worth a row.
+  "computer.updated",
   /**
    * The boundary this deployment booted with.
    *
@@ -389,6 +414,17 @@ export const auditEventTypes = [
   "bot.deleted",
   "bot.callback_token_issued",
   "bot.callback_token_revoked",
+  /*
+   * A Bot's lifecycle as one person runs it: paused, resumed, reset, how loudly it may reach them,
+   * a follow-up it scheduled for itself, and a delegated task somebody stopped. See agents/lifecycle.ts.
+   */
+  "bot.paused",
+  "bot.resumed",
+  "bot.reset",
+  "bot.notifications_changed",
+  "bot.follow_up_scheduled",
+  "bot.follow_up_cancelled",
+  "bot.handoff_stopped",
 
   /*
    * One Bot handing work to another.
@@ -438,6 +474,59 @@ export const auditEventTypes = [
    * withholds; the offered credential never does.
    */
   "routines.dispatch_refused",
+  /** A person pressed Run now on a routine: real work, outside its schedule. */
+  "routines.run_requested",
+  /** An authenticated trigger (webhook, provider, email, Slack) queued a responsibility run. */
+  "responsibility.triggered",
+  /*
+   * The approval gate and the person, kept apart so a reader never mistakes one for the other.
+   *
+   * `approval.evaluated` is the gate's own verdict on an action (`payload.decidedBy: "policy"`): a
+   * built-in safety requirement, a custom rule, the auto-review model, or the person's default.
+   * `approval.person_decided` is a human pressing allow once, always, deny or done
+   * (`payload.decidedBy: "person"`). `approval.withdrawn` is a pending request closed without a
+   * decision, with its reason: approvals switched off, or a rule that now allows it.
+   * Rule changes and settings changes, a person's own and the team's, are on the trail for the same
+   * reason a grant is.
+   */
+  "approval.evaluated",
+  "approval.person_decided",
+  "approval.withdrawn",
+  "approval.rule_changed",
+  "approval.settings_changed",
+  /*
+   * Enterprise controls (server/src/admin). Every switch an administrator flips is on the trail with
+   * who flipped it, because the table only holds the current answer.
+   */
+  "capability.changed",
+  "enterprise.setting_changed",
+  // Turning SSO-required on ended the sessions made before it.
+  "auth.sessions_revoked",
+  "network_policy.changed",
+  "network_policy.removed",
+  /*
+   * Somebody named in INITIAL_ADMIN_EMAILS signing in with a social provider while SSO is required.
+   * Allowed, so a broken identity provider cannot lock the deployment out, and loud: it is the one
+   * sign-in that bypasses the rule.
+   */
+  "session.break_glass",
+  /* SCIM 2.0: a directory creating, suspending and restoring somebody. */
+  "person.provisioned",
+  "person.deprovisioned",
+  "person.reprovisioned",
+  /* An administrator ending a member's computers, and the sweep that ends unused ones. */
+  "computer.terminated",
+  "computer.terminated_inactive",
+  /* A Bot connected to, or disconnected from, a Slack, Teams or SMS conversation. */
+  "delivery.linked",
+  "delivery.unlinked",
+  /* Routines, however they were made: by a person on the screen or by a Bot through its tools. */
+  "routine.created",
+  "routine.updated",
+  "routine.deleted",
+  "routine.enabled_changed",
+  /* A run refused because its model is not on the team model allowlist. */
+  "model.refused",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
@@ -447,12 +536,34 @@ export type AuditInitiator =
   | { kind: "person" }
   | { kind: "deployment" }
   | { kind: "routine"; id: string }
-  | { kind: "handoff"; id: string };
+  | { kind: "responsibility"; id: string }
+  | { kind: "memory"; id: string }
+  | { kind: "handoff"; id: string; origin?: AuditInitiator };
 
 export const PERSON_INITIATOR: AuditInitiator = { kind: "person" };
 
 /** The deployment acting as itself: at start-up, or refusing a caller it could not identify. */
 export const DEPLOYMENT_INITIATOR: AuditInitiator = { kind: "deployment" };
+
+/**
+ * The initiator a hop from `fromBotId` runs under.
+ *
+ * `origin` IS ALWAYS THE ROOT — what started the first run in the chain — and never another hop, so
+ * a check that needs to know who is steering reads one field however deep the chain is. A source
+ * that is itself a hop with no origin passes none on: an origin made up here would be read as fact.
+ */
+export function handoffInitiator(
+  fromBotId: string,
+  source: AuditInitiator | undefined,
+): AuditInitiator {
+  const root = source ?? PERSON_INITIATOR;
+  if (root.kind === "handoff") {
+    return root.origin
+      ? { kind: "handoff", id: fromBotId, origin: root.origin }
+      : { kind: "handoff", id: fromBotId };
+  }
+  return { kind: "handoff", id: fromBotId, origin: root };
+}
 
 /*
  * The vocabulary, kept as the declaration of what a row's `initiator_kind` can be.
@@ -465,6 +576,8 @@ export const auditInitiatorKinds = [
   "person",
   "deployment",
   "routine",
+  "responsibility",
+  "memory",
   "handoff",
 ] as const;
 
@@ -576,14 +689,54 @@ function initiatorColumns(initiator: AuditInitiator | undefined) {
   return { initiatorKind: initiator.kind, initiatorId: initiator.id };
 }
 
+/** One row as written, handed to anything that streams the trail elsewhere. */
+export type AuditTapEvent = {
+  eventType: string;
+  targetType: string;
+  targetId?: string;
+  actorUserId?: string;
+  initiatorKind: string;
+  initiatorId: string | null;
+  payload: Record<string, unknown>;
+};
+
+export type AuditTap = (event: AuditTapEvent) => void;
+
+const auditTaps = new Set<AuditTap>();
+
+/**
+ * Hear every row after it is written: the OpenTelemetry/SIEM exporter and Action Recording.
+ *
+ * After the insert, and only when it succeeded, so nothing is streamed that the trail does not hold.
+ * A tap that throws is logged and ignored: streaming a row must never fail writing it.
+ */
+export function addAuditTap(tap: AuditTap): () => void {
+  auditTaps.add(tap);
+  return () => auditTaps.delete(tap);
+}
+
 export function createAuditStore(database: Database): AuditStore {
   return {
     insert: async ({ initiator, ...event }) => {
-      await database.insert(auditEvents).values({
+      const row = {
         ...event,
         ...initiatorColumns(initiator),
         payload: redactAuditPayload(event.payload) as Record<string, unknown>,
-      });
+      };
+      await database.insert(auditEvents).values(row);
+      for (const tap of auditTaps) {
+        try {
+          tap(row);
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              type: "audit-tap-failed",
+              eventType: row.eventType,
+              error: String(error),
+            }),
+          );
+        }
+      }
     },
   };
 }

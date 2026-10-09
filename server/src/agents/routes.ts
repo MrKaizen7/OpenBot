@@ -3,10 +3,13 @@ import { Hono } from "hono";
 import type { AuditEventType, AuditStore } from "../audit";
 import { recordAuditEvent } from "../audit";
 import type { AppVariables } from "../auth/guards";
+import { afterExposureChange } from "../plugins/exposure-change";
+import type { SharedUseStore } from "../plugins/shared-use-store";
 import { testAgentConnection } from "./connection-test";
 import { checkAgentEndpoint } from "./endpoint";
 import { canManageAgent } from "./profile-policy";
 import {
+  AgentAssignedError,
   AgentNotFoundError,
   AgentNotManageableError,
   type AgentProfileStore,
@@ -263,12 +266,11 @@ export function createAgentRoutes(
     /** The Bots this one may address today, read per call so a revoked grant stops showing. */
     reachableFrom: (agentId: string) => Promise<readonly string[]>;
     /**
-     * Whether this Bot can be a grantee at all — the handing-on tool executes inside this
-     * deployment's own run loop, so only a Bot that runs in it can be offered one. Exposed so the
-     * screen can say that once, instead of letting every switch fail with the same refusal.
-     * Optional so a caller without a plugin store answers "no" rather than crashing the read.
+     * Whether this Bot can be a grantee at all: any Bot that exists, built in or at its own
+     * endpoint, since both reach the same handoff desk. Optional so a caller without a plugin store
+     * answers "no" rather than crashing the read.
      */
-    runsHere?: (agentId: string) => Promise<boolean | undefined>;
+    canHandOn?: (agentId: string) => Promise<boolean | undefined>;
   },
   /**
    * Whether a coworker can run on this deployment's own Bot, i.e. be created with no endpoint.
@@ -287,6 +289,13 @@ export function createAgentRoutes(
    * dialog nagged built-in coworkers about a credential they never needed.
    */
   managedEndpoint?: string,
+  /**
+   * Where a Bot's shared accounts live, so making a Bot public can say what that means for them.
+   *
+   * Absent in a deployment with no plugin store, which is a deployment where `afterExposureChange`
+   * already reports nothing rather than reach for a store that is not there.
+   */
+  sharedUse?: SharedUseStore,
 ) {
   /** The dto with the one fact only this closure knows: whether the coworker runs on our own Bot. */
   const dto = (actor: AgentActor, agent: AgentProfile) => ({
@@ -550,7 +559,24 @@ export function createAgentRoutes(
         ...(parsed.value.endpoint ? { endpoint: parsed.value.endpoint } : {}),
         ...(parsed.value.auth ? { keyReplaced: true } : {}),
       });
-      return context.json({ agent: dto(context.var.actor, agent) });
+      /*
+       * Publishing is the owner's call, and a wider audience can outrun what an administrator
+       * approved for a shared account this Bot holds. Reported only on the edit that opens a Bot to
+       * everybody, so a screen can offer to ask rather than let the first refused call be how anybody
+       * finds out.
+       */
+      return context.json({
+        agent: dto(context.var.actor, agent),
+        ...(parsed.value.visibility === "public"
+          ? {
+              sharedApps: await afterExposureChange(
+                sharedUse,
+                context.var.actor,
+                agent.id,
+              ),
+            }
+          : {}),
+      });
     } catch (error) {
       return mapStoreError(context, error);
     }
@@ -719,8 +745,8 @@ export function createAgentRoutes(
           reachable: handoff ? await handoff.reachableFrom(agentId) : [],
           // Whether this Bot can hold such a grant at all; the write path refuses one that cannot,
           // and the screen should say so before a person flips switches that can only bounce.
-          grantable: handoff?.runsHere
-            ? ((await handoff.runsHere(agentId)) ?? false)
+          grantable: handoff?.canHandOn
+            ? ((await handoff.canHandOn(agentId)) ?? false)
             : false,
         },
       });
@@ -766,6 +792,7 @@ function agentDto(actor: AgentActor, agent: AgentProfile) {
     // another user's coworker, so a roster that split "mine" on it would file other people's work
     // under yours, and only for administrators, who are the least likely to notice.
     mine: agent.ownerUserId === actor.id,
+    assignedToMe: agent.assignedToMe ?? false,
   };
 }
 
@@ -784,6 +811,9 @@ function mapStoreError(context: Context, error: unknown): Response {
   }
   if (error instanceof ManagedAgentUnavailableError) {
     return context.json({ error: error.message }, 400);
+  }
+  if (error instanceof AgentAssignedError) {
+    return context.json({ error: error.message }, 409);
   }
   throw error;
 }

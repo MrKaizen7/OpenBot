@@ -28,6 +28,7 @@ import { agentKeys } from "@/lib/agents/queries";
 import { authKeys } from "@/lib/auth/queries";
 import { type ChannelSummary, channelKeys } from "@/lib/channels/queries";
 import { userPreferencesQueryOptions } from "@/lib/settings/message-list";
+import { botLifecycleKeys } from "@/lib/bot-lifecycle/queries";
 
 // Keep the sidebar's live-update socket offline; these tests exercise HTTP pagination.
 class OfflineWebSocket extends EventTarget implements WebSocket {
@@ -165,6 +166,7 @@ function renderSidebar() {
   clients.push(queryClient);
   queryClient.setQueryData(userPreferencesQueryOptions("user").queryKey, {
     messageListEmphasis: "thread",
+    selfHostBannerDismissed: false,
   });
   queryClient.setQueryData(authKeys.currentUser(), {
     id: "user",
@@ -173,6 +175,12 @@ function renderSidebar() {
     onboarding: null,
   });
   queryClient.setQueryData(agentKeys.list(false), []);
+  // The sidebar's attention list polls on its own schedule; this test counts channel requests only.
+  queryClient.setQueryDefaults(botLifecycleKeys.attention, {
+    staleTime: Number.POSITIVE_INFINITY,
+    refetchInterval: false,
+  });
+  queryClient.setQueryData(botLifecycleKeys.attention, []);
   queryClient.setQueryData(channelKeys.list(), {
     pages: [
       { channels: [channel("Recent conversation")], nextCursor: "older/page" },
@@ -211,6 +219,7 @@ test("message emphasis updates mounted rows from the account preferences cache",
   act(() =>
     clients[0]?.setQueryData(userPreferencesQueryOptions("user").queryKey, {
       messageListEmphasis: "agent",
+      selfHostBannerDismissed: false,
     }),
   );
   await waitFor(() => expect(agent.className).toContain("text-[0.9rem]"));

@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
+  type ApprovalGate,
+  currentApprovalContext,
+  type HostCommandPolicy,
+} from "../approvals/types";
+import {
   HOST_ACCESS_DESKTOP_LEASE_MS,
   type HostAccessDesktopOperation,
   type HostAccessDesktopPollResponse,
@@ -31,6 +36,14 @@ type OperationState = {
 };
 
 type HostAccessBrokerOptions = {
+  approvalGate?: ApprovalGate;
+  /**
+   * The member's command policy after the team cap (the stricter applies): ask every time, always
+   * allow, or never. `never` is refused here before anything reaches the computer. `ask` and `allow`
+   * are carried to the desktop with the operation; the server's gate (safety requirements, rules,
+   * auto-review) still applies to both. Absent means ask.
+   */
+  commandPolicy?: (actorId: string) => Promise<HostCommandPolicy>;
   desktopLeaseMs?: number;
   operationTtlMs?: number;
 };
@@ -67,18 +80,62 @@ export function createHostAccessBroker(
       actorId: state.actorId,
       ...(state.grantId ? { grantId: state.grantId } : {}),
     };
-    operations.set(cancelOperation.operationId, {
+    const cancelState: OperationState = {
       operation: cancelOperation,
       actorId: state.actorId,
       botId: state.botId,
       grantId: state.grantId,
       leasedUntil: null,
-      expiresAt: null,
+      expiresAt: now() + operationTtlMs,
       expiryTimer: null,
       resolve: () => {},
       reject: () => {},
       settled: false,
-    });
+    };
+    // A cancel is addressed to a desktop that may never come back for it, and this map has no
+    // other bound on it: nothing but `resolveDesktopOperation` ever removed one, so a worker that
+    // did not return left the entry here for the life of the process, growing `operations` by one
+    // per abandoned operation and leaving `statusFor` reporting it to the person as pending
+    // forever. Expiring on the same clock as any other queued operation keeps the window open
+    // long enough for a desktop that reconnects to still be told to stop, and gives up on one that
+    // does not. Deleted rather than failed, because a cancel has nobody left to reject.
+    cancelState.expiryTimer = setTimeout(() => {
+      operations.delete(cancelOperation.operationId);
+    }, operationTtlMs);
+    unrefTimer(cancelState.expiryTimer);
+    operations.set(cancelOperation.operationId, cancelState);
+  }
+
+  function queueStopFor(actorId: string) {
+    const stopOperation: HostAccessDesktopOperation = {
+      operationId: randomUUID(),
+      kind: "stop",
+      botId: "*",
+      actorId,
+    };
+    const stopState: OperationState = {
+      operation: stopOperation,
+      actorId,
+      botId: stopOperation.botId,
+      leasedUntil: null,
+      expiresAt: now() + operationTtlMs,
+      expiryTimer: null,
+      resolve: () => {},
+      reject: () => {},
+      settled: false,
+    };
+    // A stop is addressed to a desktop that may never come back for it, for the same reason a
+    // cancel is: nothing but `resolveDesktopOperation` ever removed this entry, so a worker that
+    // never polled left it here for the life of the process, growing `operations` by one per press
+    // of Stop and leaving `statusFor` reporting it to the person as pending for ever. Deleted rather
+    // than failed, because a stop has nobody left to reject: it used to be built by `enqueue` and
+    // discarded with `void`, so it carried a promise nobody held, and a second Stop failed it
+    // through that promise with no handler attached.
+    stopState.expiryTimer = setTimeout(() => {
+      operations.delete(stopOperation.operationId);
+    }, operationTtlMs);
+    unrefTimer(stopState.expiryTimer);
+    operations.set(stopOperation.operationId, stopState);
   }
 
   function failOperation(state: OperationState, reason: string) {
@@ -204,7 +261,7 @@ export function createHostAccessBroker(
       grants.set(grant.id, publicGrant(grant));
     },
 
-    callHost(input: {
+    async callHost(input: {
       kind: "list_files" | "read_file" | "write_file" | "run_command";
       botId: string;
       actorId: string;
@@ -224,7 +281,43 @@ export function createHostAccessBroker(
       } catch (error) {
         return Promise.reject(error);
       }
-      return enqueue<unknown>({
+      const grant = requireGrant(input);
+      // No await unless something is configured: the operation is then queued synchronously, which
+      // is what a desktop poll racing this call relies on.
+      const commandPolicy =
+        input.kind !== "run_command"
+          ? undefined
+          : options.commandPolicy
+            ? await options.commandPolicy(input.actorId)
+            : "ask";
+      if (commandPolicy === "never")
+        throw new HostAccessRefusedError(
+          "Commands on your computer are set to never run, by you or by your team. Change it in Approvals if you want Bots to run commands here.",
+        );
+      // Safety requirements, rules and auto-review apply whatever the command policy is.
+      const approval =
+        options.approvalGate &&
+        (await options.approvalGate({
+          actorId: input.actorId,
+          botId: input.botId,
+          toolRef: `host/${input.kind}`,
+          effect:
+            input.kind === "write_file" || input.kind === "run_command"
+              ? "write"
+              : "read",
+          scope: input.grantId,
+          args: input,
+          target: {
+            grantId: grant.id,
+            displayName: grant.displayName,
+            relativePath: input.relativePath ?? "",
+          },
+          continuation: currentApprovalContext(),
+        }));
+      if (approval && "replay" in approval) return approval.replay;
+      // The owner may revoke the grant while approval storage was being consulted.
+      requireGrant(input);
+      const result = await enqueue<unknown>({
         operationId: randomUUID(),
         kind: input.kind,
         botId: input.botId,
@@ -234,7 +327,10 @@ export function createHostAccessBroker(
         ...(input.content !== undefined ? { content: input.content } : {}),
         ...(input.command ? { command: input.command } : {}),
         ...(input.writable === true ? { writable: true } : {}),
+        ...(commandPolicy ? { commandPolicy } : {}),
       });
+      await approval?.complete(result);
+      return result;
     },
 
     nextDesktopOperation(): HostAccessDesktopPollResponse | null {
@@ -321,17 +417,14 @@ export function createHostAccessBroker(
       }
       const affected = [...operations.values()].filter(
         (state) =>
-          state.actorId === actorId && state.operation.kind !== "cancel",
+          state.actorId === actorId &&
+          state.operation.kind !== "cancel" &&
+          state.operation.kind !== "stop",
       );
       for (const state of affected) {
         failOperation(state, "Host access was stopped.");
       }
-      void enqueue({
-        operationId: randomUUID(),
-        kind: "stop",
-        botId: "*",
-        actorId,
-      });
+      queueStopFor(actorId);
     },
 
     statusFor(actorId: string): HostAccessStatus {

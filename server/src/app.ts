@@ -3,14 +3,25 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { serveStatic } from "hono/bun";
 import { MAX_IMAGE_BYTES } from "../../shared/attachments";
+import { enterpriseControls } from "./admin/controls";
+import { createEnterpriseGate } from "./admin/gate";
+import { createEnterpriseAdminRoutes } from "./admin/routes";
 import {
   authoriseAgentCall,
   parseAgentToolCallInput,
+  type RunAssertion,
   sameToken,
 } from "./agents/callback-token";
+import { computerAccessCheck } from "./agents/computer-access";
+import {
+  type BotLifecycleServices,
+  createBotLifecycleRoutes,
+} from "./agents/lifecycle-routes";
 import type { BotAccessCheck } from "./agents/profile-policy";
 import type { AgentProfileStore } from "./agents/profile-store";
 import { createAgentRoutes } from "./agents/routes";
+import { createApprovalRoutes } from "./approvals/routes";
+import type { ApprovalService } from "./approvals/service";
 import {
   type AuditEventType,
   type AuditInitiator,
@@ -36,6 +47,7 @@ import {
   createChannelAttachmentRoutes,
 } from "./channels/attachments";
 import type { ChannelEventHub } from "./channels/events";
+import { createGroupRoutes, type GroupConversations } from "./channels/group";
 import { type ChannelStore, createChannelRoutes } from "./channels/routes";
 import type { ThreadIdentity } from "./channels/thread-identity";
 import { createThreadRoutes } from "./channels/thread-routes";
@@ -49,9 +61,20 @@ import type { PageFrameStore } from "./computer/page-frames";
 import type { PolicyStore } from "./computer/policy-store";
 import { createComputerRoutes } from "./computer/routes";
 import { configuredAuthProviders, type DeploymentConfig } from "./config";
-import type { CredentialAdminService, CredentialInput } from "./credentials";
+import {
+  type CredentialAdminService,
+  type CredentialInput,
+  CredentialRefusedError,
+} from "./credentials";
 import type { Database } from "./db/client";
 import { withoutStatement } from "./db/query-failure";
+import {
+  createDeliveryRoutes,
+  createDeliveryWebhookRoutes,
+} from "./delivery/routes";
+import type { DemonstrationRecorder } from "./demonstrations/recording";
+import { createDemonstrationRoutes } from "./demonstrations/routes";
+import type { DemonstrationStore } from "./demonstrations/store";
 import { mountDesktopConnectionFailure } from "./desktop-connection-failure";
 import { createTranscriptionProvider } from "./dictation/provider";
 import { createDictationRoutes } from "./dictation/routes";
@@ -62,25 +85,46 @@ import {
   createLearningRoutes,
   type LearningAdminDependencies,
 } from "./learning/routes";
+import type { MemoryIngestion } from "./memory/ingestion";
+import { createMemoryRoutes } from "./memory/routes";
+import type { MemoryStore } from "./memory/store";
 import { parsePageLimit } from "./paging";
+import { createPasswordRoutes, createSignInRoutes } from "./passwords/routes";
+import type { SignInService } from "./passwords/service";
 import type { OnboardingStore } from "./people/onboarding";
 import { MAX_PAGE, type PeopleStore } from "./people/store";
+import type { AccountModeSwitch } from "./plugins/account-mode";
 import type { ComposioBroker } from "./plugins/broker";
 import { createPluginRoutes } from "./plugins/routes";
+import { createSharedUseRoutes } from "./plugins/shared-use-routes";
+import type { SharedUseStore } from "./plugins/shared-use-store";
 import {
   isDeploymentFault,
   PluginRefusedError,
   type PluginStore,
 } from "./plugins/store";
 import { REFUSAL_MARKER, vendorAnswer } from "./plugins/tools";
+import type { ProactiveEngine } from "./proactive/engine";
+import { createProactiveRoutes } from "./proactive/routes";
+import type { ProactiveStore } from "./proactive/store";
 import {
   type ModelProviderProxy,
   mountProviderOAuthProxy,
 } from "./provider-oauth";
+import type { ResponsibilityBindingStore } from "./responsibilities/bindings";
+import type { ResponsibilityEngine } from "./responsibilities/engine";
+import { createGithubResponsibilityRoutes } from "./responsibilities/github";
+import { createResponsibilityRoutes } from "./responsibilities/routes";
+import type { TriggerStore } from "./responsibilities/triggers";
+import type { ResponsibilityStore } from "./responsibilities/types";
 import { createRoutineRoutes, type RoutineStore } from "./routines/routes";
 import type { RoutineRunner } from "./routines/runner";
 import type { IntentRouter } from "./routing/classify";
 import { createRoutingRoutes } from "./routing/routes";
+import { createCoworkerRoutingService } from "./routing/service";
+import type { SelfHostBanner } from "./self-host-banner";
+import { createTeamBotRoutes } from "./team-bots/routes";
+import type { TeamBots } from "./team-bots/team-bots";
 import type { PackageStatusReader } from "./tenant-package";
 import {
   INSTRUCTIONS_LIMIT,
@@ -132,13 +176,18 @@ export const UPLOAD_BODY_LIMIT_BYTES =
  * The address is on the row rather than only the user id, because the id means nothing to a person
  * reading the trail a year later and the user row may be gone by then.
  */
-export type DeploymentToolCaller = (input: {
+export type DeploymentToolCallInput = {
   name: string;
   args: Record<string, unknown>;
   botId: string;
   actorId: string;
   initiator?: AuditInitiator;
-}) => Promise<{ text: string; isError: boolean } | null>;
+  /** Full verified scope. A caller cannot choose a different source thread, depth or lease. */
+  run: RunAssertion;
+};
+export type DeploymentToolCaller = (
+  input: DeploymentToolCallInput,
+) => Promise<{ text: string; isError: boolean } | null>;
 
 async function recordPersonEvent(
   auditStore: AuditStore | undefined,
@@ -335,6 +384,57 @@ export function createApp(
   userPreferences?: UserPreferencesStore,
   voiceSessions?: VoiceSessionServices,
   learning?: LearningAdminDependencies,
+  coworker?: {
+    demonstrations?: {
+      store: DemonstrationStore;
+      recorder: DemonstrationRecorder;
+    };
+    approvals?: ApprovalService;
+    /**
+     * Shared apps: who may use an app's one team account, and the switch that makes an app Shared.
+     *
+     * A field here rather than another positional parameter. Everything from `auditReader` on is
+     * optional and positional, so a 37th argument is one an caller can misplace silently — the trap
+     * `composio` and `connect` are both commented for. One object carries both halves because every
+     * surface that needs one needs the other: the plugin routes switch modes and record approvals,
+     * the approvals inbox answers requests, and publishing or assigning a Bot re-checks what it was
+     * approved for. Absent, none of those surfaces exists — and nothing can turn an app Shared.
+     */
+    shared?: { modes: AccountModeSwitch; use: SharedUseStore };
+    /** The private sign-in form and the Passwords vault. See passwords/service.ts. */
+    passwords?: SignInService;
+    delivery?: {
+      authenticated: Omit<
+        Parameters<typeof createDeliveryRoutes>[0],
+        "requireUser"
+      >;
+      webhooks: Parameters<typeof createDeliveryWebhookRoutes>[0];
+    };
+    memory?: { store: MemoryStore; ingestion: MemoryIngestion };
+    proactive?: { store: ProactiveStore; engine: ProactiveEngine };
+    responsibilities?: {
+      store: ResponsibilityStore;
+      engine: ResponsibilityEngine;
+      bindings: ResponsibilityBindingStore;
+      /** Event triggers: owner management, public signed ingress and optional SES/SNS email. */
+      triggers?: {
+        store: TriggerStore;
+        emailDomain: string | null;
+        ingressRoutes: Hono;
+        emailRoutes: Hono | null;
+      };
+    };
+    groups?: GroupConversations;
+    teamBots?: TeamBots;
+    /** Pause, reset, Activity and attention for a person's own Bots. See agents/lifecycle.ts. */
+    lifecycle?: BotLifecycleServices;
+  },
+  /**
+   * Whether to offer help self-hosting, which also hides it from a deployment that pays for
+   * Intelligence. Absent falls back to the operator's switch alone, so a test or a build without the
+   * resolver still answers from `config.selfHostBanner` rather than asking the network.
+   */
+  selfHostBanner?: SelfHostBanner,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
   mountDesktopConnectionFailure(app, desktopHostToken);
@@ -358,6 +458,11 @@ export function createApp(
        * both halves, so off means off.
        */
       generativeUi: config.generativeUi,
+      // Whether to offer help self-hosting OpenBot. A fork running it for its own people turns it off,
+      // and a deployment that pays for Intelligence never sees it. See self-host-banner.ts.
+      selfHostBanner: selfHostBanner
+        ? await selfHostBanner.shown()
+        : config.selfHostBanner,
       transcription: Boolean(config.transcription),
       voice: Boolean(config.voice),
       /*
@@ -379,6 +484,12 @@ export function createApp(
        * companies use this deployment, which is not theirs to have before they sign in.
        */
       ssoConfigured: ((await identityProviders?.list()) ?? []).length > 0,
+      /*
+       * Whether an administrator requires SSO. The screen then leads with SSO and keeps social
+       * sign-in only as the administrators' audited break-glass; the server refuses everybody else.
+       */
+      ssoRequired:
+        enterpriseControls()?.snapshot()?.settings.ssoRequired === true,
     }),
   );
   /*
@@ -485,6 +596,15 @@ export function createApp(
     : auth && roleRepository
       ? createRequireUser(auth, roleRepository)
       : authenticationUnavailable;
+  // Enterprise controls: capability switches and the model allowlist in front of the routes they
+  // govern, the admin screen's API, and the SCIM verbs the GET/POST auth handler above does not take.
+  app.use("/api/*", createEnterpriseGate(requireUser));
+  app.route("/api/admin/enterprise", createEnterpriseAdminRoutes(requireUser));
+  app.on(["PUT", "PATCH", "DELETE"], "/api/auth/scim/*", (context) =>
+    auth
+      ? auth.handler(context.req.raw)
+      : context.json({ error: "No identity provider is configured." }, 503),
+  );
 
   app.route(
     "/api/audio",
@@ -993,12 +1113,19 @@ export function createApp(
         return context.json({ error: "Credential input is invalid." }, 400);
       }
 
-      return context.json({
-        credential: await credentialService.rotate({
-          ...input,
-          previousCredentialId: context.req.param("credentialId"),
-        }),
-      });
+      try {
+        return context.json({
+          credential: await credentialService.rotate({
+            ...input,
+            previousCredentialId: context.req.param("credentialId"),
+          }),
+        });
+      } catch (error) {
+        if (error instanceof CredentialRefusedError) {
+          return context.json({ error: error.message }, error.status);
+        }
+        throw error;
+      }
     },
   );
   app.post(
@@ -1016,12 +1143,20 @@ export function createApp(
         );
       }
 
-      return context.json({
-        credential: await credentialService.revoke(
-          context.req.param("credentialId"),
-          context.var.actor.id,
-        ),
-      });
+      try {
+        return context.json({
+          credential: await credentialService.revoke(
+            context.req.param("credentialId"),
+            context.var.actor.id,
+          ),
+        });
+      } catch (error) {
+        // Not found or already revoked: the second click on Revoke, answered as what it is.
+        if (error instanceof CredentialRefusedError) {
+          return context.json({ error: error.message }, error.status);
+        }
+        throw error;
+      }
     },
   );
   app.get("/api/admin/package", requireUser, async (context) => {
@@ -1135,7 +1270,8 @@ export function createApp(
         computerGateway,
         computerPolicy,
         requireUser,
-        canUseBot,
+        // Not `canUseBot`: a Team Bot's teammates use the Bot, not its owner's signed-in computer.
+        agentProfileStore ? computerAccessCheck(agentProfileStore) : canUseBot,
         pageFrames,
         auditReader,
       ),
@@ -1188,7 +1324,7 @@ export function createApp(
               reachableFrom: (agentId) =>
                 pluginStore.botsReachableFrom(agentId),
               // The same answer the write path checks, read up front so the screen can say it once.
-              runsHere: (agentId) => pluginStore.agentRunsHere(agentId),
+              canHandOn: (agentId) => pluginStore.agentCanHandOn(agentId),
             }
           : undefined,
         // Whether "built-in" is a kind of coworker this deployment can actually make: the create
@@ -1197,6 +1333,7 @@ export function createApp(
         // The managed Bot's address, so a coworker created without an endpoint — which creation
         // stores as running at this address — can be told apart from one a person hosts.
         config.managedAgent?.endpoint?.toString(),
+        coworker?.shared?.use,
       ),
     );
     // Choosing a coworker for an untagged message needs the same permission-filtered roster the
@@ -1206,29 +1343,31 @@ export function createApp(
       app.route(
         "/api/route",
         createRoutingRoutes(
-          agentProfileStore,
-          intentRouter,
-          requireUser,
-          auditStore,
-          /*
-           * Which vendors each coworker holds tools for, so the router weighs what a coworker can
-           * reach and not only what somebody wrote it was for. Only when there is a plugin store to
-           * ask: a deployment with no connectors routes exactly as it did.
-           */
-          pluginStore
-            ? async (agentId) => {
-                const granted = await pluginStore.listForAgent(agentId);
-                return [
-                  ...new Set(
-                    granted.tools.map(
-                      (tool) =>
-                        tool.toolName.replace(/^mcp__/, "").split("__")[0] ??
-                        tool.toolName,
+          createCoworkerRoutingService({
+            store: agentProfileStore,
+            router: intentRouter,
+            auditStore,
+            /*
+             * Which vendors each coworker holds tools for, so the router weighs what a coworker can
+             * reach and not only what somebody wrote it was for. Only when there is a plugin store to
+             * ask: a deployment with no connectors routes exactly as it did.
+             */
+            reachableSystems: pluginStore
+              ? async (agentId) => {
+                  const granted = await pluginStore.listForAgent(agentId);
+                  return [
+                    ...new Set(
+                      granted.tools.map(
+                        (tool) =>
+                          tool.toolName.replace(/^mcp__/, "").split("__")[0] ??
+                          tool.toolName,
+                      ),
                     ),
-                  ),
-                ];
-              }
-            : undefined,
+                  ];
+                }
+              : undefined,
+          }),
+          requireUser,
         ),
       );
     }
@@ -1304,13 +1443,137 @@ export function createApp(
   }
 
   if (routineStore) {
-    app.route("/api/routines", createRoutineRoutes(routineStore, requireUser));
+    app.route(
+      "/api/routines",
+      createRoutineRoutes(routineStore, requireUser, {
+        runner: routineRunner,
+        auditStore,
+      }),
+    );
+  }
+
+  if (coworker?.delivery) {
+    app.route(
+      "/api/delivery/webhooks",
+      createDeliveryWebhookRoutes(coworker.delivery.webhooks),
+    );
+    app.route(
+      "/api/delivery",
+      createDeliveryRoutes({ ...coworker.delivery.authenticated, requireUser }),
+    );
+  }
+  if (coworker?.demonstrations)
+    app.route(
+      "/api/demonstrations",
+      createDemonstrationRoutes(
+        coworker.demonstrations.store,
+        coworker.demonstrations.recorder,
+        requireUser,
+      ),
+    );
+  if (coworker?.lifecycle)
+    app.route(
+      "/api/bots",
+      createBotLifecycleRoutes(coworker.lifecycle, requireUser),
+    );
+  if (coworker?.groups)
+    app.route("/api/groups", createGroupRoutes(coworker.groups, requireUser));
+  if (coworker?.teamBots)
+    app.route(
+      "/api/team-bots",
+      createTeamBotRoutes(coworker.teamBots, requireUser, coworker.shared?.use),
+    );
+  /*
+   * BEFORE `/api/approvals`, which would otherwise take every path under it and answer 404 for
+   * these. Needs the trail as well as the store: approving a Bot's use of a team account is a
+   * decision somebody must be able to find later.
+   */
+  if (coworker?.shared && auditStore)
+    app.route(
+      "/api/approvals/shared-use",
+      createSharedUseRoutes(coworker.shared.use, requireUser, auditStore),
+    );
+  if (coworker?.approvals)
+    app.route(
+      "/api/approvals",
+      createApprovalRoutes(coworker.approvals, requireUser),
+    );
+  if (coworker?.passwords) {
+    app.route(
+      "/api/sign-in-requests",
+      createSignInRoutes(
+        coworker.passwords,
+        requireUser,
+        // A sign-in is typed into the Bot's computer, so it answers to the same rule.
+        agentProfileStore ? computerAccessCheck(agentProfileStore) : canUseBot,
+      ),
+    );
+    app.route(
+      "/api/passwords",
+      createPasswordRoutes(coworker.passwords, requireUser),
+    );
+  }
+  if (coworker?.proactive)
+    app.route(
+      "/api/proactive",
+      createProactiveRoutes(
+        coworker.proactive.store,
+        coworker.proactive.engine,
+        requireUser,
+      ),
+    );
+  if (coworker?.memory)
+    app.route(
+      "/api/memory",
+      createMemoryRoutes(
+        coworker.memory.store,
+        coworker.memory.ingestion,
+        requireUser,
+      ),
+    );
+  if (coworker?.responsibilities) {
+    const { store, engine, bindings } = coworker.responsibilities;
+    app.route(
+      "/api/responsibilities",
+      createResponsibilityRoutes(
+        store,
+        engine,
+        requireUser,
+        bindings,
+        coworker.responsibilities.triggers,
+        coworker.shared?.use,
+      ),
+    );
+    if (coworker.responsibilities.triggers) {
+      app.route(
+        "/api/events/triggers",
+        coworker.responsibilities.triggers.ingressRoutes,
+      );
+      if (coworker.responsibilities.triggers.emailRoutes)
+        app.route(
+          "/api/events/email",
+          coworker.responsibilities.triggers.emailRoutes,
+        );
+    }
+    app.route(
+      "/api/events/github",
+      createGithubResponsibilityRoutes({
+        bindingFor: bindings.githubBindingFor,
+        ingest: (event) => engine.ingest(event),
+      }),
+    );
   }
 
   if (componentStore) {
     app.route(
       "/api/components",
-      createComponentRoutes(componentStore, requireUser, auditStore, canUseBot),
+      createComponentRoutes(
+        componentStore,
+        requireUser,
+        auditStore,
+        canUseBot,
+        sandboxedStore,
+      ),
     );
   }
 
@@ -1349,6 +1612,7 @@ export function createApp(
           appUrl: config.appUrl,
         },
         composio,
+        coworker?.shared,
       ),
     );
   }
@@ -1440,6 +1704,7 @@ export function createApp(
           botId: verdict.botId,
           actorId: verdict.actorId,
           initiator: verdict.initiator,
+          run: verdict.run,
         });
         if (deploymentResult) return context.json(deploymentResult);
 

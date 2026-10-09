@@ -10,10 +10,11 @@ import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import type { Observable } from "rxjs";
 import { defer, finalize, from, fromEvent, switchMap, takeUntil } from "rxjs";
 import { z } from "zod";
+import { PROVENANCE_GUIDANCE } from "../../shared/bot-prompt";
 import {
-  COMPUTER_GUIDANCE,
-  PROVENANCE_GUIDANCE,
-} from "../../shared/bot-prompt";
+  type ActorAgentResolver,
+  CoworkerUnavailableError,
+} from "./agents/agent-resolver";
 import { sanitizeSeededHistory } from "./agents/history-sanitize";
 import {
   PLAN_RUN_COMPLETED,
@@ -22,6 +23,10 @@ import {
   planModelForEnvironment,
 } from "./agents/plan-model";
 import type { AgentActor } from "./agents/profile-types";
+import {
+  executeNativeApprovalTool,
+  nativeApprovalRun,
+} from "./approvals/native-context";
 import type { AuditInitiator } from "./audit";
 import {
   attachmentIdsIn,
@@ -30,19 +35,24 @@ import {
   type StoredAttachment,
 } from "./channels/attachment-parts";
 import type { AgentFetch, StallGuard } from "./channels/stall-guard";
+import { HeadlessToolsMiddleware } from "./computer/headless-tools";
 import type { DeploymentConfig } from "./config";
 import { observeModelConnection } from "./desktop-connection-failure";
 import { desktopTelemetryProperties } from "./desktop-telemetry";
 import { observeIntelligenceAuthentication } from "./intelligence-client";
 import { RemoteLearnedSkillsMiddleware } from "./learning/remote";
 import {
+  type AcquireLearnedSkills,
   createLearningRuntime,
   LEARNED_SKILL_TOOL_NAMES,
-  type AcquireLearnedSkills,
   type LearnedSkillInvocation,
   type LearningRuntime,
 } from "./learning/runtime";
 import type { LearningSettingsStore } from "./learning/settings";
+import {
+  type LoadPersonalMemory,
+  PersonalMemoryMiddleware,
+} from "./memory/tools";
 import type { SelectableSkill, Selection } from "./plugins/selection";
 import {
   latestUserText,
@@ -51,6 +61,7 @@ import {
 } from "./plugins/selection";
 import type { GrantedTool } from "./plugins/tools";
 import { grantedToolGuidance, parametersFor } from "./plugins/tools";
+import { UNTRUSTED_GUIDANCE } from "./untrusted-content";
 
 /**
  * The CopilotKit runtime, always in Intelligence mode.
@@ -162,6 +173,8 @@ export function standingRoleMessage(
        * "Investigate policies, transaction monitoring, and control evidence."
        */
       PROVENANCE_GUIDANCE,
+      // And for the same reason, how to read the untrusted-content envelope its tool results carry.
+      UNTRUSTED_GUIDANCE,
     ].join("\n\n"),
   };
 }
@@ -412,6 +425,8 @@ export function builtInAgentConfiguration(
        * it says comes from its own knowledge, and saying so is the only honest move available.
        */
       PROVENANCE_GUIDANCE,
+      // How to read the untrusted-content envelope every outside result arrives in.
+      UNTRUSTED_GUIDANCE,
       ...(grantedToolGuidance(tools, connectedVendors)
         ? [grantedToolGuidance(tools, connectedVendors)]
         : []),
@@ -428,7 +443,22 @@ export function builtInAgentConfiguration(
      * bounds a model that would otherwise call tools in a circle. Interrupt tools, if any are ever
      * added here, require the default of one and must not be mixed in.
      */
-    ...(allTools.length > 0 ? { tools: allTools, maxSteps: TOOL_STEPS } : {}),
+    ...(allTools.length > 0
+      ? {
+          tools: allTools.map((tool) => ({
+            ...tool,
+            execute: (args: unknown, execution?: { toolCallId?: string }) =>
+              executeNativeApprovalTool(
+                tool.name,
+                args,
+                execution?.toolCallId,
+                tools.find((granted) => granted.name === tool.name)?.initiator,
+                () => tool.execute(args),
+              ),
+          })),
+          maxSteps: TOOL_STEPS,
+        }
+      : {}),
   };
 }
 
@@ -496,6 +526,7 @@ export async function buildAgents(
    */
   markAttachmentsSent?: MarkAttachmentsSent,
   acquireLearnedSkills?: AcquireLearnedSkills,
+  loadPersonalMemory?: LoadPersonalMemory,
 ): Promise<Record<string, AbstractAgent>> {
   let vendors: readonly string[] = [];
   try {
@@ -534,9 +565,8 @@ export async function buildAgents(
   }
   return Object.fromEntries(
     await Promise.all(
-      agents.map(async (agent) => [
-        agent.id,
-        await buildAgent(
+      agents.map(async (agent) => {
+        const built = await buildAgent(
           agent,
           model,
           apiKey,
@@ -553,8 +583,11 @@ export async function buildAgents(
           loadAttachment,
           markAttachmentsSent,
           acquireLearnedSkills,
-        ),
-      ]),
+        );
+        if (loadPersonalMemory)
+          built.use(new PersonalMemoryMiddleware(agent.id, loadPersonalMemory));
+        return [agent.id, built];
+      }),
     ),
   );
 }
@@ -893,16 +926,9 @@ async function buildAgent(
      * `remote.run(input)` skips it: the endpoint would get a run with no standing role, no holdings
      * message, no tools and no signed assertion, and every one of those failures is silent.
      *
-     * WHICH IS ALSO WHY A REMOTE BOT IS OFFERED NEITHER `message_bot` NOR `ask_person`. Both are
-     * executed here, by the wrapper below, against this deployment's grants and caps. A Bot at an
-     * endpoint runs its own loop and is handed descriptions of tools it may call back for, and the
-     * callback path executes MCP refs only — so a described `message_bot` would be a tool it could
-     * announce and never invoke. Granting one is refused at the door rather than stored dead: see
-     * `enablementRefusal` in plugins/routes.ts.
-     *
-     * Making this work is a feature rather than a fix: the callback would have to carry a run
-     * assertion the endpoint cannot forge, and execute a hop on its behalf. Worth doing; not done
-     * here, and worth knowing it is missing rather than assuming it is not.
+     * Coordination tools are resolved for this exact run by the same loader built-in Bots use.
+     * Their executable half stays in the signed deployment callback, where current grants, source
+     * ownership and handoff lease ownership are checked again.
      *
      * AND THE PERSON'S STANDING INSTRUCTIONS ARE NOT SENT HERE EITHER. `standingInstructions` is
      * built-in only, deliberately: a remote Bot composes its own prompt at somebody else's endpoint,
@@ -920,6 +946,8 @@ async function buildAgent(
       loadAttachment,
       markAttachmentsSent,
       acquireLearnedSkills,
+      handoff,
+      initiator,
     );
   }
 
@@ -1184,11 +1212,9 @@ function remoteAgentWithStandingRole(
    */
   remote: AbstractAgent,
   /**
-   * What this Bot was granted, described rather than executable.
-   *
-   * A framework Bot runs its own loop and calls these back through `/api/agent-tools/call`, so what
-   * it needs from here is the offer: the name, what the tool is for, and the arguments it takes.
-   * The executing half stays on this side, where the grant and the policy are.
+   * What this Bot was granted. Governed vendor and host tools execute through the AG-UI client
+   * lifecycle here, where the grant, policy and approval context are. Coordination tools use the
+   * signed deployment callback to retain verified delegation and durable person-question routing.
    */
   tools: GrantedTool[] = [],
   signRun?: SignRun,
@@ -1221,6 +1247,8 @@ function remoteAgentWithStandingRole(
   /** How this run records that those files were sent. See {@link buildAgents}. */
   markAttachmentsSent?: MarkAttachmentsSent,
   acquireLearnedSkills?: AcquireLearnedSkills,
+  coordination?: HandoffForRun,
+  initiator?: AuditInitiator,
 ) {
   /*
    * What this Bot holds, as a second standing message.
@@ -1255,9 +1283,25 @@ function remoteAgentWithStandingRole(
   ) => {
     const holdingsMessage = holdingsMessageFor(tools);
     const runAssertion = signRun
-      ? signRun(agent.id, input.runId, input.threadId)
+      ? signRun(
+          agent.id,
+          input.runId,
+          input.threadId,
+          input.forwardedProps?.openbotRun,
+        )
       : undefined;
-    const deploymentTools = tools.map((tool) => tool.name);
+    // Governed vendor/host calls use the actual AG-UI client lifecycle, so approvals capture
+    // the provider's toolCallId, messages and state. Coordination retains its signed callback.
+    const clientTools = tools.filter(
+      (tool) =>
+        typeof tool.execute === "function" &&
+        tool.name !== "message_bot" &&
+        tool.name !== "ask_person",
+    );
+    const clientNames = new Set(clientTools.map((tool) => tool.name));
+    const deploymentTools = tools
+      .filter((tool) => !clientNames.has(tool.name))
+      .map((tool) => tool.name);
     const forwardedProps = {
       ...(isPlainObject(input.forwardedProps) ? input.forwardedProps : {}),
       openbotBotId: agent.id,
@@ -1329,8 +1373,8 @@ function remoteAgentWithStandingRole(
           )
         : Promise.resolve(history),
     ).pipe(
-      switchMap((messages) =>
-        next.run({
+      switchMap((messages) => {
+        const prepared: RunAgentInput = {
           ...input,
           messages: [
             agent.standingMessage,
@@ -1370,8 +1414,23 @@ function remoteAgentWithStandingRole(
               : input.context,
           // Who the Bot is calling back as, so the audit row names it rather than "an agent".
           forwardedProps,
-        } as never),
-      ),
+        };
+        if (clientTools.length === 0) return next.run(prepared);
+        return new HeadlessToolsMiddleware(
+          clientTools.map((tool) => ({
+            definition: {
+              name: tool.name,
+              description: tool.description,
+              parameters: z.toJSONSchema(tool.parameters) as Record<
+                string,
+                unknown
+              >,
+            },
+            execute: (args) => tool.execute(args),
+          })),
+          initiator,
+        ).run(prepared, next);
+      }),
     );
   };
 
@@ -1383,9 +1442,15 @@ function remoteAgentWithStandingRole(
   return new CloningRemoteAgent(remote, (target) => {
     target.use((input, next) => {
       const stream = defer(() =>
-        from(narrow ? narrow(input) : Promise.resolve(tools)).pipe(
-          switchMap((offered) => runWith(offered, input, next)),
-        ),
+        from(
+          Promise.all([
+            narrow ? narrow(input) : Promise.resolve(tools),
+            coordination?.(agent.id, input) ?? Promise.resolve([]),
+          ]).then(([offered, coordinationTools]) => [
+            ...offered,
+            ...coordinationTools,
+          ]),
+        ).pipe(switchMap((offered) => runWith(offered, input, next))),
       );
       const owned =
         !!process.env.MANAGED_AGENT_TOKEN &&
@@ -1586,7 +1651,9 @@ class BuiltInAgentWithSaneHistory extends BuiltInAgent {
      * this existed.
      */
     if (!load)
-      return observeModelConnection(super.run({ ...input, messages: history }));
+      return nativeApprovalRun({ ...input, messages: history }, () =>
+        observeModelConnection(super.run({ ...input, messages: history })),
+      );
     /*
      * Deferred, because `run` has to answer with a stream straight away and reading the bytes is a
      * database round trip. `defer` puts that read on the subscription, which is where the run
@@ -1603,7 +1670,9 @@ class BuiltInAgentWithSaneHistory extends BuiltInAgent {
         ),
       ).pipe(
         switchMap((messages) =>
-          observeModelConnection(super.run({ ...input, messages })),
+          nativeApprovalRun({ ...input, messages }, () =>
+            observeModelConnection(super.run({ ...input, messages })),
+          ),
         ),
       ),
     );
@@ -1800,6 +1869,7 @@ export async function resolveRuntimeAgents(
    */
   markAttachmentsSent?: MarkAttachmentsSent,
   acquireLearnedSkills?: AcquireLearnedSkills,
+  loadPersonalMemory?: LoadPersonalMemory,
 ): Promise<Record<string, AbstractAgent>> {
   const all = await loadAgents();
   if (all.length === 0) {
@@ -1835,6 +1905,7 @@ export async function resolveRuntimeAgents(
     loadAttachment,
     markAttachmentsSent,
     acquireLearnedSkills,
+    loadPersonalMemory,
   );
 }
 
@@ -1853,6 +1924,8 @@ export type SignRun = (
   runId: string,
   /** Which conversation, so a Bot handing work on cannot choose where the answer lands. */
   threadId: string,
+  /** A prior signed delegation, verified by the deployment signer before being preserved. */
+  previousAssertion?: unknown,
 ) => string;
 
 /** Who is asking. Agent visibility is decided per person, so a run has to know this first. */
@@ -1872,99 +1945,10 @@ export type LoadAgentsForActor = (
  */
 export function createRequestAgents(
   identifyActor: IdentifyActor,
-  loadAgents: LoadAgentsForActor,
-  model: RuntimeModel,
-  resolveModelApiKey: () => Promise<string | null>,
-  /**
-   * Shared across every request rather than built per run, because it is the thing that has to
-   * outlive one: the sweep that notices a silent stream has to still be running after the request
-   * that opened it has been answered.
-   */
-  stallGuard?: StallGuard,
-  /** What each Bot may call, resolved for whoever is asking. Absent means no tools. */
-  loadToolsForActor?: (
-    actorId: string,
-    initiator?: AuditInitiator,
-  ) => LoadToolsForBot,
-  /** Resolved per request, because what it signs is who this request turned out to be. */
-  signRunForActor?: (actorId: string, initiator?: AuditInitiator) => SignRun,
-  /** What every built-in Bot is told about the computer. Absent means this deployment has none. */
-  computerGuidance?: string,
-  /** Which vendors this deployment connects to, held by a Bot or not. Absent means none. */
-  loadVendors?: () => Promise<readonly string[]>,
-  /**
-   * How a run's tools are narrowed, resolved for whoever is asking.
-   *
-   * Per actor like the tools themselves, because the skills a Bot holds are read through the same
-   * grants, and because the discovery row has to name the person the run belongs to.
-   */
-  selectionForActor?: (actorId: string) => ToolSelection,
-  /** The fetch remote agents are dialled with. See {@link buildAgents}. */
-  agentFetch?: AgentFetch,
-  /**
-   * How a run gets its tool for handing work to another Bot, resolved for whoever is asking.
-   *
-   * Per actor for the same reason the tools are: which Bots may be reached is decided against the
-   * roster that person can see, so a Bot must never be able to address one they cannot.
-   */
-  handoffForActor?: (actorId: string) => HandoffForRun,
-  /**
-   * What this person has told every coworker they run, resolved for whoever is asking.
-   *
-   * Per actor, and through `identifyActor` rather than anything in the request body, for the same
-   * reason the grants are: this text goes into a prompt that then speaks as that person's coworker,
-   * so which person it belongs to has to be decided by the session and never by the caller.
-   */
-  loadInstructionsForActor?: (actorId: string) => LoadInstructions,
-  /**
-   * How the files on a person's message are put in front of the model, resolved for whoever is
-   * asking.
-   *
-   * Per actor, and through `identifyActor` rather than anything in the request body, for the reason
-   * `loadInstructionsForActor` is: the ids arrive inside `input.messages`, which the browser wrote,
-   * so a turn can name an attachment in a channel the asker was never in. Which rows this may read
-   * has to be decided by the session, exactly as the fetch route decides it. Appended last for the
-   * positional reason above. Absent means nothing is inlined, which is what every deployment did
-   * before this existed.
-   */
-  loadAttachmentForActor?: (actorId: string) => LoadAttachment,
-  /**
-   * How a send is recorded against the files it carried, resolved for whoever is asking.
-   *
-   * Per actor for a stricter reason than the reader beside it: this one WRITES `attachedAt`, and
-   * `markAttachmentsSent` will only stamp rows the acting person uploaded themselves. Deciding who
-   * that is from the session rather than from the request body is what keeps one member from
-   * recording a send against a colleague's staged file. Appended last, positionally. Absent means
-   * nothing is recorded.
-   */
-  markAttachmentsSentForActor?: (actorId: string) => MarkAttachmentsSent,
-  acquireLearnedSkills?: AcquireLearnedSkills,
+  resolver: ActorAgentResolver,
 ) {
-  return async ({ request }: { request: Request }) => {
-    const actor = await identifyActor(request);
-    return resolveRuntimeAgents(
-      () => loadAgents(actor),
-      model,
-      resolveModelApiKey,
-      stallGuard,
-      loadToolsForActor?.(actor.id),
-      signRunForActor?.(actor.id),
-      computerGuidance,
-      loadVendors,
-      selectionForActor?.(actor.id),
-      agentFetch,
-      handoffForActor?.(actor.id),
-      // Every Bot this person can see, so no `onlyBotId` here; the instructions follow it.
-      undefined,
-      loadInstructionsForActor?.(actor.id),
-      // No initiator: a request is a person asking, which is the default this path has always
-      // carried. Named only so the attachments after it land in the right position.
-      undefined,
-      loadAttachmentForActor?.(actor.id),
-      markAttachmentsSentForActor?.(actor.id),
-      acquireLearnedSkills,
-    );
-  };
+  return async ({ request }: { request: Request }) =>
+    resolver.resolveAgentsForActor(await identifyActor(request));
 }
 
 /**
@@ -2053,70 +2037,17 @@ const THREAD_LOCK_TTL_SECONDS = 120;
 
 export function mountCopilotRuntime(
   config: DeploymentConfig,
-  model: RuntimeModel,
-  loadAgents: LoadAgentsForActor,
-  resolveModelApiKey: () => Promise<string | null>,
+  resolver: ActorAgentResolver,
   identifyUser: IdentifyUser,
   identifyActor: IdentifyActor,
-  /**
-   * The watch on Bot streams. Not optional, unlike the parameter it forwards to: a guard built from
-   * a timeout of zero already watches nothing, so an unconfigured deployment has one to hand and
-   * there is no reason for a caller to have to say `undefined` here to reach `basePath`.
-   */
-  stallGuard: StallGuard,
-  loadToolsForActor?: (
-    actorId: string,
-    initiator?: AuditInitiator,
-  ) => LoadToolsForBot,
-  signRunForActor?: (actorId: string, initiator?: AuditInitiator) => SignRun,
-  basePath = "/api/copilotkit",
-  loadVendors?: () => Promise<readonly string[]>,
-  selectionForActor?: (actorId: string) => ToolSelection,
-  /** The fetch remote agents are dialled with. See {@link buildAgents}. */
-  agentFetch?: AgentFetch,
-  /** How a run gets its tool for handing work on. Absent means no Bot is offered one. */
-  handoffForActor?: (actorId: string) => HandoffForRun,
-  /**
-   * Told when a run starts and ends on a thread, so a channel can show it is working.
-   *
-   * The universal seam: every run the runtime processes — a person's own turn, a headless hop —
-   * takes and gives back the thread lock, and it does so on the server, so a person who sends a
-   * message and navigates away still lights the channel they left. A side effect only: it is never
-   * awaited in the lock path and a failure in it never touches whether the lock was taken.
-   */
-  onRunBusy?: (input: { threadId: string; busy: boolean }) => void,
-  /**
-   * What the person asking has told every built-in coworker they run, resolved per person.
-   *
-   * Given to both the request path and `agentFor` below, so a hop delivered to a Bot at three in the
-   * morning carries the same standing instructions the Bot in front of the person does. A seam wired
-   * into only one of them would be the drift `agentFor` exists to prevent.
-   */
-  loadInstructionsForActor?: (actorId: string) => LoadInstructions,
-  /**
-   * How the files on a message are put in front of the model, resolved per person, on both paths
-   * below.
-   *
-   * Given to the request path and to `agentFor` alike, for the reason `loadInstructionsForActor` is:
-   * a routine's turn at three in the morning has to inline exactly as a person's chat turn does, and
-   * a seam wired into only one of them is the drift `agentFor` exists to prevent. Actor-keyed for
-   * the same reason every other collaborator here is — the ids come out of browser-supplied message
-   * content, so the person the run belongs to is what decides which attachments it may read.
-   * Appended last because these are positional. Absent means nothing is inlined.
-   */
-  loadAttachmentForActor?: (actorId: string) => LoadAttachment,
-  /**
-   * How a send is recorded against the files it carried, resolved per person, on both paths below.
-   *
-   * Given to the request path and to `agentFor` alike, for the reason `loadAttachmentForActor` is:
-   * a routine's turn at three in the morning sends exactly as a person's chat turn does, and a seam
-   * wired into only one of them is the drift `agentFor` exists to prevent. Actor-keyed because the
-   * write is scoped to rows that person uploaded. Appended last. Absent means nothing is recorded.
-   */
-  markAttachmentsSentForActor?: (actorId: string) => MarkAttachmentsSent,
-  learningSettings?: LearningSettingsStore,
+  options: {
+    basePath?: string;
+    onRunBusy?: (input: { threadId: string; busy: boolean }) => void;
+    learningSettings?: LearningSettingsStore;
+  } = {},
 ) {
   const { intelligence } = config.runtime;
+  const { basePath = "/api/copilotkit", onRunBusy, learningSettings } = options;
 
   /**
    * The same Bot a person's run would get, built without a request.
@@ -2141,30 +2072,14 @@ export function mountCopilotRuntime(
     botId: string;
     initiator?: AuditInitiator;
   }): Promise<AbstractAgent | null> => {
-    const { actor } = input;
-    const agents = await resolveRuntimeAgents(
-      () => loadAgents(actor),
-      model,
-      resolveModelApiKey,
-      stallGuard,
-      loadToolsForActor?.(actor.id, input.initiator),
-      signRunForActor?.(actor.id, input.initiator),
-      config.computer ? COMPUTER_GUIDANCE : undefined,
-      loadVendors,
-      selectionForActor?.(actor.id),
-      agentFetch,
-      handoffForActor?.(actor.id),
-      // Only the Bot this hop is for. The roster is still read in full, so a Bot this person cannot
-      // see is still absent; what this skips is constructing the other Bots and asking the database
-      // what each of them was granted, on every delivery and again on every retry.
-      input.botId,
-      loadInstructionsForActor?.(actor.id),
-      input.initiator,
-      loadAttachmentForActor?.(actor.id),
-      markAttachmentsSentForActor?.(actor.id),
-      learning?.acquire,
-    );
-    return agents[input.botId] ?? null;
+    try {
+      return await resolver.resolveAgentForActor(input.actor, input.botId, {
+        initiator: input.initiator,
+      });
+    } catch (error) {
+      if (error instanceof CoworkerUnavailableError) return null;
+      throw error;
+    }
   };
 
   /*
@@ -2241,30 +2156,7 @@ export function mountCopilotRuntime(
     a2ui: { enabled: config.generativeUi },
     // `identifyUser` is the Intelligence projection of the same person `identifyActor` returns:
     // one resolver decides both whose threads these are and whose coworkers exist.
-    agents: createRequestAgents(
-      identifyActor,
-      loadAgents,
-      model,
-      resolveModelApiKey,
-      stallGuard,
-      loadToolsForActor,
-      signRunForActor,
-      /*
-       * Only when a computer exists. The tools themselves are registered by the surface, so a Bot is
-       * offered them without this and the guidance is what tells it how they go together: snapshot
-       * before acting, and ask a person to take the wheel at a sign-in rather than reporting the task
-       * as impossible. Absent computer, absent guidance: a Bot is not told about hands it has not got.
-       */
-      config.computer ? COMPUTER_GUIDANCE : undefined,
-      loadVendors,
-      selectionForActor,
-      agentFetch,
-      handoffForActor,
-      loadInstructionsForActor,
-      loadAttachmentForActor,
-      markAttachmentsSentForActor,
-      learning?.acquire,
-    ) as never,
+    agents: createRequestAgents(identifyActor, resolver) as never,
   });
 
   return {

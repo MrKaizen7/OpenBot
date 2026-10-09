@@ -45,6 +45,8 @@ describe("runtime capabilities", () => {
       // Default-on. The browser reads this to decide whether to offer the tool that generates an
       // interface, so it has to be here and not only in the runtime.
       generativeUi: true,
+      // Default-on: a fresh clone is somebody evaluating the template.
+      selfHostBanner: true,
       transcription: false,
       voice: false,
       // Names only. The sign-in screen reads this to know which buttons to draw.
@@ -52,6 +54,7 @@ describe("runtime capabilities", () => {
       // A boolean, not a list: naming the registered providers would tell anybody who loads the
       // sign-in page which companies use this deployment.
       ssoConfigured: false,
+      ssoRequired: false,
     });
   });
 
@@ -69,10 +72,12 @@ describe("runtime capabilities", () => {
       "mode",
       "durableHistory",
       "generativeUi",
+      "selfHostBanner",
       "transcription",
       "voice",
       "authProviders",
       "ssoConfigured",
+      "ssoRequired",
     ]);
     // The provider list is names, never the clients and secrets behind them.
     expect(body).not.toContain("google-client-secret");
@@ -97,6 +102,20 @@ describe("runtime capabilities", () => {
 
     expect(response.status).toBe(200);
     expect((await response.json()).generativeUi).toBe(false);
+  });
+
+  // A fork running OpenBot for its own people turns the banner off, and the browser has to hear it.
+  test("reports the self-host banner as off when the deployment opts out", async () => {
+    const disabled = createApp(
+      loadConfig(testEnvironment({ OPENBOT_SELF_HOST_BANNER: "false" })),
+    );
+
+    const response = await disabled.request(
+      "http://openbot.local/api/capabilities",
+    );
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).selfHostBanner).toBe(false);
   });
 });
 

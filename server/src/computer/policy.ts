@@ -78,7 +78,7 @@ export type PolicyContext = {
    * `type`, text going into a field, including any other keypress.
    * `navigate`, opening a page.
    * `read`, looking at the page or listing what is on it.
-   * `write_file` / `read_file` / `list_files`, the workspace.
+   * `write_file` / `read_file` / `download_file` / `list_files`, the workspace.
    *
    * It still cannot see whether a keypress will submit a form, only that one is coming: a type
    * carrying `submit` reports `activate` because it ends in Enter, but a browser submits
@@ -93,6 +93,7 @@ export type PolicyContext = {
     | "navigate"
     | "read"
     | "read_file"
+    | "download_file"
     | "write_file"
     | "list_files"
     // A tool on somebody else's MCP server. Split by effect for the same reason as the browser
@@ -102,7 +103,7 @@ export type PolicyContext = {
     | "write_tool"
     | "run_command";
   /**
-   * The file a `computer_read_file` or `computer_write_file` call is aimed at.
+   * The file a `computer_read_file`, `computer_download_file` or `computer_write_file` call is aimed at.
    *
    * The path is as the Bot asked for it, relative to its workspace. Containment is not policy: a path
    * that tries to escape is refused by the computer itself and is not negotiable. A rule here is about
@@ -290,10 +291,56 @@ function matches(
  * states its permissions explicitly rather than relying on a default, so that what a Bot may do is
  * always something somebody wrote down.
  */
+/**
+ * The enterprise controls, asked before the boundary's own rules.
+ *
+ * Installed by `admin/controls.ts` when the deployment runs with enterprise controls, and absent in
+ * a unit test or a script, where the boundary behaves exactly as it always did. Answering null means
+ * "nothing to say, carry on to the rules"; a decision is final, and is always a refusal that is
+ * enforced whatever this policy's mode, because a capability an administrator switched off is not a
+ * rule being trialled.
+ *
+ * Synchronous on purpose: every caller of `evaluateActionPolicy` is, and the controls answer from an
+ * in-memory snapshot kept current by LISTEN/NOTIFY. An overlay that throws refuses.
+ */
+export type PolicyOverlay = (context: PolicyContext) => PolicyDecision | null;
+
+let overlay: PolicyOverlay | null = null;
+
+export function setPolicyOverlay(next: PolicyOverlay | null): void {
+  overlay = next;
+}
+
+function enterpriseDecision(context: PolicyContext): PolicyDecision | null {
+  if (!overlay) return null;
+  try {
+    return overlay(context);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        type: "enterprise-policy-overlay-error",
+        error: String(error),
+      }),
+    );
+    return {
+      allowed: false,
+      mode: "enforce",
+      matched: "enterprise:unavailable",
+      source: "deny",
+      forward: false,
+      reason:
+        "This deployment's enterprise controls could not be checked, so the action was refused.",
+    };
+  }
+}
+
 export function evaluateActionPolicy(
   policy: ActionPolicy | null | undefined,
   context: PolicyContext,
 ): PolicyDecision {
+  const enterprise = enterpriseDecision(context);
+  if (enterprise) return enterprise;
+
   const mode: PolicyMode = policy?.mode ?? "enforce";
   const deny = policy?.deny ?? [];
   const allow = policy?.allow ?? [];

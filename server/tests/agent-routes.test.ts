@@ -15,6 +15,7 @@ import { createAgentRoutes, parseAgentInput } from "../src/agents/routes";
 import { createApp } from "../src/app";
 import type { AppVariables, AuthenticatedActor } from "../src/auth/guards";
 import { loadConfig } from "../src/config";
+import type { SharedUseStore } from "../src/plugins/shared-use-store";
 import { testEnvironment } from "./support/environment";
 
 const actor = {
@@ -366,6 +367,7 @@ describe("agent lifecycle routes", () => {
           title: validInput.title,
           roleDescription: validInput.roleDescription,
           avatarSeed: "expense-manager",
+          assignedToMe: false,
           visibility: "private",
           hidden: false,
           pinned: false,
@@ -380,6 +382,7 @@ describe("agent lifecycle routes", () => {
           title: validInput.title,
           roleDescription: validInput.roleDescription,
           avatarSeed: "expense-manager",
+          assignedToMe: false,
           visibility: "private",
           hidden: false,
           pinned: false,
@@ -394,6 +397,7 @@ describe("agent lifecycle routes", () => {
           title: validInput.title,
           roleDescription: validInput.roleDescription,
           avatarSeed: "expense-manager",
+          assignedToMe: false,
           visibility: "public",
           hidden: false,
           pinned: false,
@@ -695,7 +699,7 @@ describe("which Bots a Bot may hand work to", () => {
       enabled: true,
       canGrant: true,
       reachable: ["knowledge"],
-      // No runsHere reader was wired, and a Bot nothing can vouch for is not offered grants.
+      // No canHandOn reader was wired, and a Bot nothing can vouch for is not offered grants.
       grantable: false,
     });
   });
@@ -755,4 +759,45 @@ describe("which Bots a Bot may hand work to", () => {
 
     expect(response.status).toBe(404);
   });
+});
+
+/*
+ * Publishing is the owner's call, but a wider audience can outrun what an administrator approved
+ * for a shared account this Bot already holds. A non-admin owner who makes their Bot public is
+ * told what that gap is here, rather than finding out on the first call a stranger makes that the
+ * approval does not cover.
+ */
+test("agents: making a Bot public that uses a shared app says what needs approval", async () => {
+  const store = fakeStore();
+  const sharedUse = {
+    shortfall: async () => [{ serverId: "gh", title: "Team GitHub" }],
+  } as unknown as SharedUseStore;
+  const app = new Hono<{ Variables: AppVariables }>();
+  app.route(
+    "/",
+    createAgentRoutes(
+      store,
+      requireUser,
+      false,
+      undefined,
+      new Set(),
+      undefined,
+      false,
+      undefined,
+      sharedUse,
+    ),
+  );
+
+  const response = await app.request("http://openbot.test/agent-1", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...validInput, visibility: "public" }),
+  });
+
+  const body = (await json(response)) as {
+    sharedApps: { needsApproval: { serverId: string; title: string }[] };
+  };
+  expect(body.sharedApps.needsApproval).toEqual([
+    { serverId: "gh", title: "Team GitHub" },
+  ]);
 });

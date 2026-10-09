@@ -30,6 +30,7 @@ export const COMPUTER_TOOLS = [
   "computer_key",
   "computer_scroll",
   "computer_read_file",
+  "computer_download_file",
   "computer_write_file",
   "computer_list_files",
 ] as const;
@@ -40,11 +41,11 @@ export const COMPUTER_TOOLS = [
  * These are the calls the gateway must decide on. Reading a PAGE a Bot has already been allowed to
  * open is not a new decision; clicking "Confirm payment" on it is.
  *
- * Both file tools are here, including the read. That differs from `computer_read`, which
- * is ungoverned, and it is deliberate: a page was already permitted when it was opened, whereas the
- * workspace accumulates whatever a Bot has put in it across every task it has ever run, so "which
- * files may this Bot read" is a question a deployment genuinely needs to be able to answer. The build
- * doc says both file tools go through the gateway, and this is why that is right.
+ * Every workspace file tool is here, including the read and the download. That differs from
+ * `computer_read`, which is ungoverned, and it is deliberate: a page was already permitted when it
+ * was opened, whereas the workspace accumulates whatever a Bot has put in it across every task it
+ * has ever run, so "which files may this Bot read, list, download or write" is a question a
+ * deployment genuinely needs to be able to answer.
  */
 export const COMPUTER_ACTING_TOOLS = [
   // Navigation is governed too, and not only guarded. The client's target guard refuses a forbidden
@@ -57,6 +58,7 @@ export const COMPUTER_ACTING_TOOLS = [
   "computer_key",
   "computer_scroll",
   "computer_read_file",
+  "computer_download_file",
   "computer_write_file",
   "computer_list_files",
 ] as const;
@@ -71,6 +73,8 @@ export type ComputerToolName = (typeof COMPUTER_TOOLS)[number];
 
 export type NavigateInput = { url: string; toolCallId?: string };
 export type NavigateResult = {
+  /** The untrusted-content notice for the page's own fields. See untrusted-content.ts. */
+  untrusted?: string;
   challenge?: BrowserChallenge;
   url: string;
   title: string;
@@ -132,6 +136,7 @@ export type SnapshotElement = {
 };
 
 export type SnapshotResult = {
+  untrusted?: string;
   challenge?: BrowserChallenge;
   /**
    * Which snapshot these refs belong to. Must be sent back with every action.
@@ -206,7 +211,9 @@ export type ListFilesResult = {
 };
 
 export type ReadFileInput = { path: string };
+export type DownloadFileInput = { path: string };
 export type ReadFileResult = {
+  untrusted?: string;
   path: string;
   text: string;
   /** True when the file was longer than the extract, so the Bot can say so rather than guess. */
@@ -235,6 +242,7 @@ export type RunCommandInput = {
  * the clock never produced an exit code of its own.
  */
 export type RunCommandResult = {
+  untrusted?: string;
   command: string;
   exitCode: number;
   stdout: string;
@@ -307,6 +315,29 @@ export type ComputerProfile = {
    * read by people and rendered in a browser.
    */
   egress: string | null;
+};
+
+/**
+ * A login typed into the Bot's current page by the computer itself.
+ *
+ * `origin` is the site the person was asked to sign in to. The computer refuses to type anything when
+ * the page is on a different origin, so a login cannot be carried to a page that redirected elsewhere.
+ */
+export type SignInFillInput = {
+  origin: string;
+  username?: string;
+  password: string;
+  /** A one-time code the person entered alongside, typed if the site asks for one. */
+  code?: string;
+};
+
+/** What the computer reports. No field here ever carries a credential. */
+export type SignInFillResult = {
+  submitted: boolean;
+  /** Whether the page still shows a password field after submitting: the plainest sign of a failure. */
+  passwordFieldVisible: boolean;
+  url: string;
+  error?: string;
 };
 
 export type SecretResult = {

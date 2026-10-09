@@ -42,10 +42,10 @@ at `agent-langgraph` on a laptop.
 
 | Variable             | Default                            | Meaning                                                             |
 | -------------------- | ---------------------------------- | ------------------------------------------------------------------- |
-| `PORT`               | `3001`                             | API server port.                                                    |
+| `PORT`               | `3001`                             | API server port. `SERVER_PORT` names the same port; set either, or both to the same value, or the server refuses to start. |
 | `NODE_ENV`           | unset                              | `production` refuses the example `KEY_ENCRYPTION_KEY`. It does not decide whether sign-in is required; see `OPENBOT_SINGLE_USER`. |
 | `TENANT_PACKAGE_DIR` | `../examples/fintech`              | Tenant package directory, resolved from `server/`.                  |
-| `DEPLOYMENT_ID`      | the tenant package's id            | Names this deployment inside a shared Intelligence project.          |
+| `DEPLOYMENT_ID`      | the tenant package's id            | Names this deployment inside a shared Intelligence project, and prefixes the identity a Shared app's account is held under at the vendor. That identity is fixed when the app is made Shared, so changing this later does not move it. |
 | `OPENAI_API_KEY`     | unset                              | Default model key for built-in agents and both shipped Bots.        |
 | `OPENAI_BASE_URL`    | unset                              | OpenAI-compatible endpoint that key is spent against. See below.    |
 | `BOT_PROVIDER`       | `openai`                           | Provider the framework Bot (`agent-langgraph`) and the picked harness run on: `openai`, `anthropic`, or `google`. The Python Bots read it too; `agent-bot` does not, it is OpenAI only. |
@@ -63,7 +63,8 @@ at `agent-langgraph` on a laptop.
 | `AUDIT_RETENTION_DAYS` | unset                            | Whole number of days to keep audit rows; older ones are removed. Unset keeps the trail forever. |
 | `WORKER_SHARED_SECRET` | unset; `start.sh` uses a fixed local default | The secret the routines worker presents to fire a due routine. Without it the server refuses every handoff, whether or not a worker exists to send one. |
 | `OPENBOT_GENERATIVE_UI` | unset (capability on)               | Set `false` or `0` to stop Bots from answering with generated interfaces. |
-| `OPENBOT_ACCESSIBILITY_DISABLED` | `true` or `1` stops naming OpenBot on the analytics the runtime already sends. |
+| `OPENBOT_SELF_HOST_BANNER` | unset (banner on)               | Set `false` or `0` to hide the bar offering help self-hosting OpenBot, for everybody. It never shows on a paid Intelligence plan, and each person can also close it for themselves. |
+| `OPENBOT_ACCESSIBILITY_DISABLED` | unset | `true` or `1` stops naming OpenBot on the analytics the runtime already sends. |
 | `COMPOSIO_API_KEY`   | unset                              | One key for the whole deployment, for the broker that holds people's accounts for a few hundred apps. Unset, there is nothing to connect, nothing to grant and no Composio tool for a Bot to call; what remains is one row that goes nowhere, under **More apps** on the admin Plugins page, naming this variable. See [Composio](plugins/composio.md). |
 
 **`OPENBOT_GENERATIVE_UI`** enables generated interfaces by default: streamed HTML/CSS/JavaScript
@@ -72,6 +73,20 @@ send their named action and selected values back to the current conversation's B
 Set `OPENBOT_GENERATIVE_UI=false` or `0` to disable both. `true`, `1`, an empty value, or an unset
 value leave the capability on. The server configures both runtime renderers and reports the same
 setting through `/api/capabilities` to the browser.
+
+**`OPENBOT_SELF_HOST_BANNER`** shows a slim bar at the top of the signed-in app offering
+CopilotKit's help self-hosting OpenBot, linking to `https://copilotkit.ai/talk-to-an-engineer` with
+`ref=openbot_app`. Closing it is saved to that person's preferences, so it stays closed on every
+device they sign in from. Set `false` or `0` to hide it for everybody, which suits a fork running
+OpenBot for its own organization. Any other value, or none, leaves it on.
+
+Left on, it still never shows on a deployment that pays for Intelligence. The server reads the
+deployment's Intelligence entitlement and hides the bar when it is active on a paid plan (`pro`,
+`team`, `team_self_hosted` or `enterprise`) or comes from an AWS Marketplace licence. A free or
+developer plan, an inactive entitlement, and one that cannot be read all show it. The answer is
+kept for ten minutes, so a plan bought today hides the bar within ten minutes, and a page waits at
+most a second for the first answer after the server starts. In Helm, set the variable through
+`config.extraEnv`.
 
 The component catalogue has separate per-Bot grants. Its sortable data table (`showTable`),
 interactive form (`askForm`), and other compiled or playground-authored components remain governed
@@ -132,7 +147,8 @@ in-cluster Service address.
 
 `shared/model-providers.json` is one file, and every language in the box reads it: the TypeScript
 Bots through `shared/model-providers.ts`, the Python Bots through `shared/model_providers.py`, and
-any other implementation straight as JSON. It has two sections — the facts per provider, and the
+any other implementation straight as JSON. The one Bot that does not is `agent-claude-sdk`, which has
+no `bots` row. It has two sections: the facts per provider, and the
 provider and model each Bot runs:
 
 ```json
@@ -233,7 +249,7 @@ the chat model provider; neither `OPENAI_BASE_URL` nor `OPENAI_API_KEY` is inher
 
 For OpenAI, set the base URL to `https://api.openai.com/v1` and select an available transcription
 model such as `gpt-transcribe`. A compatible local endpoint can instead use
-`http://localhost:8000/v1` and its own model name. Compatibility with chat completions alone does
+`http://127.0.0.1:8000/v1` and its own model name. Compatibility with chat completions alone does
 not imply transcription support. See the [OpenAI transcription guide](https://developers.openai.com/api/docs/guides/speech-to-text).
 
 The composer shows the microphone when the service is configured. Browser microphone access needs
@@ -330,8 +346,11 @@ policies apply. See [OpenAI WebRTC](https://developers.openai.com/api/docs/guide
 | `OPENBOT_ORGANIZATION_AUTH_URL` | An OpenBot deployment that verifies employee identity and roles. Decides sign-in ahead of `OPENBOT_SINGLE_USER`. |
 
 **Some variables belong to the desktop app, not to you.** A desktop installation writes these into
-its own deployment's `.env` and owns their values: `OPENBOT_MODEL_OAUTH_FILE`, `CHATGPT_AUTH_FILE`
-and `CLAUDE_CODE_OAUTH_TOKEN`. When a model provider is connected by OAuth rather than by key, the
+its own deployment's `.env` and owns their values: `OPENBOT_MODEL_OAUTH_FILE`, `CHATGPT_AUTH_FILE`,
+`CLAUDE_CODE_OAUTH_TOKEN`, and the `PICKED_HARNESS_*` names that describe the Bot picked during setup
+(`PICKED_HARNESS_IMAGE`, `PICKED_HARNESS_URL`, `PICKED_HARNESS_PORT` and the rest). The server reads
+`PICKED_HARNESS_IMAGE` and `PICKED_HARNESS_URL` to hand that Bot `MANAGED_AGENT_TOKEN`, and refuses to
+start when they are set without it. When a model provider is connected by OAuth rather than by key, the
 desktop also points `OPENAI_BASE_URL` at OpenBot's own loopback route and sets `OPENAI_API_KEY` to a
 local proxy credential rather than a provider key, so those two do not mean what the table above says
 in that mode. A server you configure yourself is unaffected by all of this.
@@ -340,7 +359,7 @@ in that mode. A server you configure yourself is unaffected by all of this.
 nothing to sign anybody in and does not say that was deliberate refuses to start, naming what to
 configure, because a public URL where every visitor is an administrator fails silently. `NODE_ENV`
 does not enter into it. `.env.example` ships the line switched on, so a clone runs with no
-configuration at all.
+configuration at all. `OPENBOT_DEV_NO_AUTH=true`, the flag's former name, is still honoured.
 
 **But not on a public address.** The flag says you meant an open deployment; it does not say who can
 reach it. If `OPENBOT_PUBLIC_URL`, `OPENBOT_APP_URL` or any `TRUSTED_ORIGINS` entry is an address
@@ -401,6 +420,24 @@ where `<provider>` is `google`, `microsoft` or `okta`.
 
 A [Composio](plugins/composio.md) app needs `OPENBOT_APP_URL` and nothing else of the two: the consent lives at the broker, so no redirect URI of ours is registered anywhere, but the address Composio returns somebody to has to be absolute and this is where it comes from. Connecting a brokered account refuses where it resolves to nothing, rather than sending somebody to a consent screen with no way back.
 
+### SCIM provisioning
+
+A directory such as Okta or Entra ID can create, update and remove people through SCIM 2.0 at
+`<BETTER_AUTH_URL>/api/auth/scim/v2`. It is off while `SCIM_BEARER_TOKEN` is unset.
+
+| Variable                 | Meaning                                                                                                     |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `SCIM_BEARER_TOKEN`      | The token the directory sends as a bearer token. Setting it switches SCIM on.                              |
+| `SCIM_BEARER_TOKEN_NEXT` | Optional second token accepted beside the first, so the directory can move to a new one before the old one is removed. |
+| `SCIM_CONNECTION_ID`     | The name of the directory connection. Defaults to `directory`.                                             |
+
+A person the directory creates gets the `user` role, or `admin` when their address is in
+`INITIAL_ADMIN_EMAILS`, and still signs in through the company's identity provider: SCIM creates no
+password. Their directory groups become their OpenBot groups, which per-group capability switches
+and network policies read. Deactivating or deleting someone in the directory ends their sessions,
+deny-lists the address, retires the connector credentials they granted and stops their Bots'
+computers. Reactivating them lifts a deny-list entry SCIM wrote, never one an administrator wrote.
+
 ## One Bot handing work to another
 
 | Variable                   | Meaning                                                                                     |
@@ -420,6 +457,105 @@ see the Bot can read it.
 
 With both caps above at zero the screen says the capability is switched off, because a grant made
 then is a row nothing will read.
+
+## Slack and Microsoft Teams (OpenTag pairing)
+
+OpenBot reaches people in Slack and Teams through [OpenTag](https://github.com/CopilotKit/OpenTag),
+the open-source Channels SDK front. OpenTag calls OpenBot as its AG-UI agent; OpenBot does not hold a
+Slack app of its own.
+
+| Variable                        | Meaning                                                                                                                                                                           |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OPENTAG_SHARED_SECRET`         | Enables the pairing. At least 32 characters. OpenTag must send `Authorization: Bearer <secret>` (its `AGENT_AUTH_HEADER`), and OpenBot sends the same header on proactive posts. |
+| `OPENTAG_URL`                   | OpenTag's base URL, for messages sent when no Slack turn is open (replies after an approval, responsibility progress, questions). Without it those sends fail visibly in the outbox, and Slack triggers are refused because channel membership cannot be checked. |
+| `OPENTAG_BOT_ICON_URL_TEMPLATE` | Optional `https` PNG URL with `{seed}` (the Bot's avatar seed) or `{agentId}`, used as the Bot's Slack icon on proactive posts.                                                    |
+
+Point OpenTag's `AGENT_URL` at `<public URL>/api/delivery/webhooks/opentag/agent`. A person links
+their Slack or Teams identity from **Reachability**: OpenBot shows a one-time `link <code>` message,
+valid for ten minutes, which they send to the OpenTag app. After that, only that person's messages
+reach their chosen Bot, in their own OpenBot conversation, with learning, governance, approvals and
+audit on every turn. Anyone unlinked is told how to link and nothing runs. Approval requests appear
+as OpenTag approval cards (allow once, always allow, cancel) and are decided through the approvals
+service as the linked owner; a reply to a Bot's question answers that question.
+
+The former direct Slack settings (`SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_BOT_TOKEN`,
+`SLACK_TEAM_ID`, `SLACK_SIGNING_SECRET`) are refused at start-up; unset them.
+
+SMS through Twilio honours Advanced Opt-Out: `STOP` (and Twilio's other opt-out keywords) marks the
+number opted out, later messages show `opted_out` in the delivery history instead of being sent, and
+`START` resumes. Twilio sends the confirmation reply itself, so OpenBot does not.
+
+## Text messages and push notifications
+
+A provider is switched on by setting its variables and is off while none of them are set. Setting
+some of a provider's variables and not all of them stops the server at start-up with
+`Delivery configuration is incomplete:` and the names that are missing.
+
+| Variable                    | Meaning                                                                                                                                                                                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DELIVERY_PUBLIC_URL`       | The public origin providers call back on, such as a tunnel or an ingress. Twilio signs each request over the URL it was given, so this has to be the address Twilio was configured with. Unset, OpenBot uses `OPENBOT_PUBLIC_URL`, then `BETTER_AUTH_URL`. It must be an `http(s)` URL or the server does not start. |
+| `TWILIO_ACCOUNT_SID`        | Twilio account SID. One of the four SMS settings, which are set together.                                                                                                                                                                          |
+| `TWILIO_AUTH_TOKEN`         | Twilio auth token. Used to send and to check the signature on every request Twilio makes.                                                                                                                                                         |
+| `TWILIO_VERIFY_SERVICE_SID` | The Twilio Verify service that texts the code a person enters on **Reachability** to confirm their number.                                                                                                                                       |
+| `TWILIO_FROM_NUMBER`        | The Twilio number OpenBot sends from.                                                                                                                                                                                                              |
+| `EXPO_PROJECT_ID`           | The native app's EAS project id, a UUID. Switches on push notifications and sign-in from the native app (without it, the server does not trust the app's `openbotmobile://` sign-in redirect). A device registers only when the app reports this same project id; any other value is refused. A value that is not a UUID stops the server at start-up.                  |
+| `EXPO_ACCESS_TOKEN`         | Optional. Sent as `Authorization: Bearer` on every request to Expo's push service; without it those requests carry no token.                                                                                                                       |
+
+With SMS on, point the Twilio number's incoming-message webhook at
+`<DELIVERY_PUBLIC_URL>/api/delivery/webhooks/sms`. OpenBot passes
+`<DELIVERY_PUBLIC_URL>/api/delivery/webhooks/sms/status` to Twilio as the status callback on each
+message it sends.
+
+The native app in `mobile/` reads two variables of its own when it is built, from `mobile/.env`:
+`EXPO_PUBLIC_SERVER_URL`, the deployment's public URL (required, `https` outside development, no
+credentials or query string), and `EXPO_PUBLIC_EAS_PROJECT_ID`, the same project id as
+`EXPO_PROJECT_ID` above.
+
+## Inbound email triggers
+
+An email trigger gets its own address, `trigger-<triggerId>@<OPENBOT_INBOUND_EMAIL_DOMAIN>`. Mail
+reaches OpenBot through Amazon SES receiving: a receipt rule for the whole domain publishes to an
+SNS topic, and that topic has an HTTPS subscription to `<public URL>/api/events/email/sns`. OpenBot
+checks each SNS message's AWS signature and refuses any topic not listed, because a valid signature
+proves AWS sent the message, not that the topic is yours. It confirms the subscription itself when
+SNS asks.
+
+| Variable                               | Meaning                                                                                       |
+| -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `OPENBOT_INBOUND_EMAIL_DOMAIN`         | The domain the receipt rule covers, such as `in.example.com`.                                 |
+| `OPENBOT_INBOUND_EMAIL_SNS_TOPIC_ARNS` | Comma-separated ARNs of the SNS topics allowed to deliver mail.                               |
+
+Both are needed. With either missing, the email route is not mounted, and an email trigger has no
+address: its page and the Bot both say inbound email is not configured on this deployment.
+
+## Automatic Learning
+
+Learning is on by default; with no container assigned, nothing is collected or delivered and the
+deployment still starts and chats. Both variables are optional defaults that an administrator's saved
+settings under **Admin → Automatic Learning** override, including a saved off. See
+[automatic-learning.md](automatic-learning.md).
+
+| Variable                                 | Meaning                                                                                       |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `CPK_INTELLIGENCE_LEARNING_CONTAINER_ID` | Default Learning container for this deployment's Bots. 1 to 64 lowercase letters, digits and single hyphens, or the server refuses to start. |
+| `CPK_INTELLIGENCE_SKILLS_REVISION`       | An exact published skills revision to pin. Read only beside a container id. Unset follows the latest. |
+
+## OpenTelemetry export
+
+Every audit row is also sent as an OTLP log record over HTTP, so a SIEM or an OpenTelemetry
+Collector receives the same events the **Audit** page shows, as they happen. Each record carries
+`openbot.surface`: `bot`, `identity` or `control_plane`. Export never stops a request: when the
+collector cannot be reached, records are dropped after the SDK's retries, and the row in PostgreSQL
+is still the record.
+
+| Variable                           | Meaning                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Where log records go, used exactly as written. Takes precedence over the next one.                    |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`      | Collector base URL; OpenBot appends `/v1/logs`. Setting either endpoint switches export on.           |
+| `OTEL_EXPORTER_OTLP_LOGS_HEADERS`  | Headers for the logs endpoint, as `key=value` pairs separated by commas (for a collector's API key).  |
+| `OTEL_EXPORTER_OTLP_HEADERS`       | The same, used when `OTEL_EXPORTER_OTLP_LOGS_HEADERS` is unset.                                        |
+| `OTEL_SERVICE_NAME`                | The `service.name` on every record. Defaults to `openbot`.                                             |
+| `OPENBOT_OTEL_EXPORT`              | `off` turns export off while an endpoint is still set.                                                 |
 
 ## Computer and supervisor
 
@@ -443,7 +579,7 @@ then is a row nothing will read.
 `COMPUTER_SANDBOX` is not the cluster sandbox provider. A Kubernetes deployment can instead run each
 computer as a sandboxed pod, selected by `COMPUTER_SANDBOX_NAMESPACE` with `COMPUTER_SANDBOX_IDLE_AFTER`
 and `COMPUTER_SANDBOX_TEMPLATE_FILE` beside it; those are set by the Helm chart, not by Compose, and
-are covered in [charts/openbot/README.md](../../charts/openbot/README.md). The similarly named
+are covered in [charts/openbot/README.md](../charts/openbot/README.md). The similarly named
 `COMPUTER_SANDBOX` above only toggles Chromium's own process sandbox on a Docker computer.
 
 Changing `COMPUTER_BROWSER_MODE` affects new supervised computers. A computer that already exists is
@@ -631,6 +767,20 @@ The file is optional and gitignored. Without it every Bot's browser goes out dir
 default. Both the shared computer and the supervisor are given it: the computer resolves its own
 proxy from these names, and the supervisor forwards them into each computer it creates.
 
+Every computer runs its own filtering proxy on `127.0.0.1`, which applies the network policy an
+administrator sets under **Admin > Enterprise controls**, and it sets `HTTP_PROXY`, `HTTPS_PROXY` and
+`NO_PROXY` for itself and its shell to point at that filter. Do not set those three to reach an
+upstream proxy; use `EGRESS_PROXY_<BOT_ID>` or `EGRESS_PROXY_DEFAULT`, which the filter chains to.
+
+The server pushes each Bot's policy to its computer when the computer wakes and every 30 seconds
+after. Until a policy has arrived, the filter refuses every connection. Metadata and link-local
+addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254` and the like) are refused in every mode,
+including `allow_all`. `EGRESS_POLICY_REQUIRED=0` (or `false`) lets the filter allow everything
+until a policy arrives instead, which only a computer run with no API server should need. It is read
+by the computer: in Compose put it in `egress.env`, which reaches the shared computer, and on
+Kubernetes put it in `computers.extraEnv`. The supervisor forwards only the `EGRESS_PROXY` names, so
+a computer it creates does not receive it.
+
 The supervisor also reads:
 
 - `COMPUTER_IMAGE`
@@ -736,7 +886,8 @@ examples/fintech/
 ├── model.yaml
 ├── knowledge.yaml
 ├── skills.yaml      (optional)
-└── agents/          (optional)
+├── agents/          (optional, one coworker per file)
+└── catalog/         (not loaded: coworkers to copy into agents/)
     └── expense-review.yaml
 ```
 
@@ -778,15 +929,24 @@ agents:
     title: Risk & Compliance
     role_description: Investigate policies and controls.
     type: remote-ag-ui
-    endpoint: ${MANAGED_AGENT_AG_UI_URL}
+    endpoint: ${MANAGED_AGENT_AG_UI_URL:-}
 ```
 
 Each agent requires `id`, `name`, `title`, `role_description`, and `type`.
 
-| Type           | Required field  |
-| -------------- | --------------- |
-| `built-in`     | `system_prompt` |
-| `remote-ag-ui` | `endpoint`      |
+| Type            | Required field  |
+| --------------- | --------------- |
+| `built-in`      | `system_prompt` |
+| `remote-ag-ui`  | `endpoint`      |
+| `remote-mastra` | `endpoint`, and optionally `remote_agent_id` to pick one agent on that Mastra server |
+
+A remote agent whose `endpoint` resolves to an empty string is left out rather than refused, and it
+is dropped from every channel's `permitted_agents` too. That is how the example package carries a row
+for a Bot that only exists once something is configured.
+
+An agent may list `skills:`, slugs of skills this package ships in `skills.yaml`. A slug the package
+does not ship, or the same slug twice, stops the server. Two agents with the same `id` in
+`agents.yaml` stop it as well.
 
 The two types are told different amounts, which is easy to miss. A `built-in` agent gets its
 `system_prompt`; a `remote-ag-ui` agent has none, and its `role_description` is the only instruction
@@ -809,8 +969,12 @@ message saying which file wanted it, rather than leaving a Bot pointed at an add
 A coworker may also be one file of its own, in an `agents/` directory beside `agents.yaml`. Both are
 read, and a package that keeps every coworker in `agents.yaml` is unchanged.
 
+The shipped package starts with two coworkers, General Assistant and Knowledge, both in `agents.yaml`.
+Its other two entries, Risk Analyst and the picked harness, register only when their endpoints are
+configured. Ten more are in `catalog/`, which is not read. Copy one into `agents/` to add it:
+
 ```yaml
-# examples/fintech/agents/expense-review.yaml
+# examples/fintech/agents/expense-review.yaml, copied from catalog/
 id: expense-review
 name: Expense Review
 title: Finance Operations
@@ -834,6 +998,12 @@ should not depend on what a directory listing happened to return.
 The directory is in the package checksum, so adding, editing or deleting a coworker there is a
 package change like any other and a running deployment notices it on the next boot.
 
+**Deleting a file does not remove the Bot from a deployment that already registered it.** The next
+boot stops declaring it, but its row stays, still owned by the package, so it is still listed and
+still refused by delete as protected. Only a remote coworker whose `endpoint` is blank is retired
+automatically. Retire one that is gone from the package by setting `deleted_at` on its
+`agent_profiles` row, which is what delete does for a Bot somebody made.
+
 ### `channels.yaml`
 
 ```yaml
@@ -845,7 +1015,7 @@ channels:
     allowed_groups: [risk, compliance]
 ```
 
-Each channel requires `id`, `name`, `description`, `permitted_agents`, and `allowed_groups`. Every `permitted_agents` entry must match an agent id.
+Each channel requires `id`, `name`, `description`, `permitted_agents`, and `allowed_groups`. Every `permitted_agents` entry must match an agent id. A channel `id` declared twice, or an agent listed twice in one channel, stops the server.
 
 `allowed_groups` is validated and stored, and nothing reads it. It decides nothing today, and a
 deployment that writes one must not treat it as an access control. Both halves of that control are
@@ -868,7 +1038,7 @@ model:
   default_model: gpt-5.6-terra
 ```
 
-`provider` must be `openai`. `credential_secret_ref` is a reference to a stored credential, not a credential value. `default_model` is passed through as written, so an OpenAI-compatible endpoint reached through `OPENAI_BASE_URL` takes the name that endpoint publishes.
+`provider` must be `openai` or `anthropic`. `credential_secret_ref` is a reference to a stored credential, not a credential value. `default_model` is passed through as written, so an OpenAI-compatible endpoint reached through `OPENAI_BASE_URL` takes the name that endpoint publishes.
 
 ### `knowledge.yaml`
 
@@ -904,7 +1074,7 @@ Refs are `serverId/toolName`, the same form a grant is written in. A package may
 
 One slug is load-bearing. A Bot granted `skill-creator` is offered the four tools that let a conversation end in a saved skill, so a package shipping that skill should also grant it to a Bot in `agents.yaml` — shipping it and granting it to nobody boots a deployment where writing a skill in the composer quietly does nothing. It declares no `tools`, and should not: those four are the app's own rather than a connector's, so they are not `serverId/toolName` refs. See [architecture.md](architecture.md#writing-a-skill-in-a-conversation).
 
-Slugs are lowercase letters, digits and hyphens. If a package ships a slug somebody in the deployment already wrote a skill under, theirs keeps the name, the package loses that skill, and startup continues.
+Slugs are 2 to 40 lowercase letters, digits and hyphens, starting and ending with a letter or digit, the same rule the skills API and the app's form apply. A slug declared twice in `skills.yaml` stops the server. If a package ships a slug somebody in the deployment already wrote a skill under, theirs keeps the name, the package loses that skill, and startup continues.
 
 Omit the file entirely for a package with no skills.
 

@@ -4,7 +4,9 @@ import { StaleSnapshotError } from "../src/computer/client";
 import {
   ActionRefusedError,
   createComputerGateway,
+  WorkspaceNotFoundError,
   WorkspaceRefusedError,
+  WorkspaceTooLargeError,
 } from "../src/computer/gateway";
 import type { ActionPolicy } from "../src/computer/policy";
 import {
@@ -99,6 +101,11 @@ function fakeComputer(options?: {
         return Response.json({
           image: "aGVsbG8=",
           mimeType: "image/png",
+        });
+      case "/files/download":
+        calls.push("downloadFile");
+        return new Response(Uint8Array.from([0, 1, 2, 255]), {
+          headers: { "content-length": "4" },
         });
       case "/files/read":
         calls.push("readFile");
@@ -841,6 +848,100 @@ describe("the computer gateway", () => {
       "x-openbot-bot-id": "bot-1",
       "x-openbot-computer-token": "computer-secret",
     });
+  });
+
+  test("downloads raw bytes through the separate download intent and records it", async () => {
+    const { gateway, calls, rows, requests } = await gatewayWith(PERMISSIVE, {
+      token: "computer-secret",
+    });
+
+    const download = await gateway.downloadFile("bot-1", ACTOR, {
+      path: "reports/Q3 file.pdf",
+    });
+
+    expect(download.name).toBe("Q3 file.pdf");
+    expect(download.bytes).toBe(4);
+    expect(
+      new Uint8Array(await new Response(download.body).arrayBuffer()),
+    ).toEqual(Uint8Array.from([0, 1, 2, 255]));
+    expect(calls).toContain("downloadFile");
+    expect(rows[0]?.eventType).toBe("computer.action_allowed");
+    expect(rows[0]?.payload).toMatchObject({
+      action: "computer_download_file",
+      bot: "bot-1",
+      file: "reports/Q3 file.pdf",
+    });
+    const request = requests.find(({ url }) => url.includes("/files/download"));
+    expect(request?.init?.method).toBe("GET");
+    expect(request?.init?.headers).toMatchObject({
+      "x-openbot-bot-id": "bot-1",
+      "x-openbot-computer-token": "computer-secret",
+    });
+    expect(new URL(request?.url ?? "").searchParams.get("path")).toBe(
+      "reports/Q3 file.pdf",
+    );
+  });
+
+  test("an absent policy refuses a download before the computer is asked", async () => {
+    const { gateway, calls, rows } = await gatewayWith(undefined);
+
+    await expect(
+      gateway.downloadFile("bot-1", ACTOR, { path: "report.pdf" }),
+    ).rejects.toThrow(ActionRefusedError);
+    expect(calls).not.toContain("downloadFile");
+    expect(rows[0]?.eventType).toBe("computer.action_refused");
+    expect(rows[0]?.payload.action).toBe("computer_download_file");
+  });
+
+  test("a download rule does not reuse the read-file permission", async () => {
+    const separate = await gatewayWith({
+      ...PERMISSIVE,
+      deny: ['tool.name == "computer_read_file"'],
+    });
+    await expect(
+      separate.gateway.downloadFile("bot-1", ACTOR, { path: "report.pdf" }),
+    ).resolves.toMatchObject({ name: "report.pdf" });
+    expect(separate.calls).toContain("downloadFile");
+
+    const denied = await gatewayWith({
+      ...PERMISSIVE,
+      deny: ['intent == "download_file"'],
+    });
+    await expect(
+      denied.gateway.downloadFile("bot-1", ACTOR, { path: "report.pdf" }),
+    ).rejects.toThrow(ActionRefusedError);
+    expect(denied.calls).not.toContain("downloadFile");
+    expect(denied.rows[0]?.eventType).toBe("computer.action_refused");
+  });
+
+  test("records a failed download attempt after the allowed decision", async () => {
+    const { gateway, rows } = await gatewayWith(PERMISSIVE, {
+      routes: {
+        "/files/download": () =>
+          Response.json({ error: "No such file." }, { status: 404 }),
+      },
+    });
+
+    await expect(
+      gateway.downloadFile("bot-1", ACTOR, { path: "missing.pdf" }),
+    ).rejects.toThrow(WorkspaceNotFoundError);
+    expect(rows.map(({ eventType }) => eventType)).toEqual([
+      "computer.action_allowed",
+      "computer.action_failed",
+    ]);
+  });
+
+  test("maps an oversized computer response to a 413-equivalent error", async () => {
+    const { gateway } = await gatewayWith(PERMISSIVE, {
+      routes: {
+        "/files/download": () =>
+          Response.json({ error: "Too large." }, { status: 413 }),
+      },
+    });
+
+    await expect(
+      gateway.downloadFile("bot-1", ACTOR, { path: "big.zip" }),
+    ).rejects.toThrow(WorkspaceTooLargeError);
   });
 
   test("routes acting, control, file, secret, and human input calls to the correct endpoint paths", async () => {
@@ -1590,5 +1691,47 @@ describe("a Bot on the one shared computer", () => {
     } finally {
       computer.stop();
     }
+  });
+});
+
+describe("updating a computer's image", () => {
+  test("audits who moved the computer onto the new image", async () => {
+    const { provider, fetchImpl } = fakeComputer();
+    const { store, rows } = fakeAudit();
+    const asked: string[] = [];
+    provider.update = async (botId) => {
+      asked.push(botId);
+      return { updated: true, wasRunning: true, from: "old", to: "new" };
+    };
+    const gateway = createComputerGateway({
+      provider,
+      fetchImpl,
+      auditStore: store,
+      policy: () => PERMISSIVE,
+    });
+
+    expect(await gateway.updateComputer("bot-1", ACTOR)).toMatchObject({
+      updated: true,
+    });
+    expect(asked).toEqual(["bot-1"]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.eventType).toBe("computer.updated");
+    expect(rows[0]?.targetId).toBe("bot-1");
+    expect(String(rows[0]?.payload.reason)).toContain("new");
+  });
+
+  test("a provider with no image of its own says so rather than pretending", async () => {
+    const { provider, fetchImpl } = fakeComputer();
+    const { store, rows } = fakeAudit();
+    const gateway = createComputerGateway({
+      provider,
+      fetchImpl,
+      auditStore: store,
+      policy: () => PERMISSIVE,
+    });
+    await expect(gateway.updateComputer("bot-1", ACTOR)).rejects.toThrow(
+      /no computer image/,
+    );
+    expect(rows).toHaveLength(0);
   });
 });
