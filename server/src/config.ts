@@ -886,21 +886,23 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
   const settings = {
     apiUrl: url(environment, "INTELLIGENCE_API_URL"),
     gatewayWsUrl: url(environment, "INTELLIGENCE_GATEWAY_WS_URL"),
-    apiKey: optional(environment, "INTELLIGENCE_API_KEY"),
+    apiKey:
+      optional(environment, "CPK_INTELLIGENCE_API_KEY") ??
+      optional(environment, "INTELLIGENCE_API_KEY"),
     licenseToken: optional(environment, "COPILOTKIT_LICENSE_TOKEN"),
   };
 
   const missing = Object.entries({
     INTELLIGENCE_API_URL: settings.apiUrl,
     INTELLIGENCE_GATEWAY_WS_URL: settings.gatewayWsUrl,
-    INTELLIGENCE_API_KEY: settings.apiKey,
+    CPK_INTELLIGENCE_API_KEY: settings.apiKey,
   })
     .filter(([, value]) => !value)
     .map(([name]) => name);
 
   if (missing.length > 0) {
     throw new Error(
-      `CopilotKit Intelligence is required and is not configured. Missing: ${missing.join(", ")}`,
+      `CopilotKit Intelligence is required and is not configured. Missing: ${missing.join(", ")}. Legacy key name INTELLIGENCE_API_KEY is also supported.`,
     );
   }
 

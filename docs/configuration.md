@@ -550,6 +550,18 @@ to Windows loopback and use a loopback TCP relay in WSL plus an outbound Windows
 The relay and tunnel use Python and Node already present in the development setup; no package install
 or firewall exception is required.
 
+On Windows, after configuring `.env` as described below, run `start-local-chrome-dev.ps1` from PowerShell at the checkout root. It opens a separate PowerShell terminal for each missing service and skips services that are already listening. The terminals are:
+
+- WSL relay on ports 4102 and 4103
+- WSL API on port 3001 and app on port 3010
+- Windows local Chrome helper on port 4101
+- Windows-to-WSL tunnel connector
+
+Keep those terminals open. The launcher does not start Docker or open Chrome; Chrome starts when a
+Bot first uses the computer. To use a WSL distribution other than `Ubuntu`, pass
+`-Distro <distribution-name>`. The manual steps below remain available if you prefer to start each
+service yourself.
+
 1. In WSL, start the relay (it listens only on WSL loopback):
 
   ```sh

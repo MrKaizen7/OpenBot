@@ -15,7 +15,7 @@ const baseEnvironment = {
   INITIAL_ADMIN_EMAILS: "admin@openbot.test",
   INTELLIGENCE_API_URL: "http://localhost:7100",
   INTELLIGENCE_GATEWAY_WS_URL: "ws://localhost:7103",
-  INTELLIGENCE_API_KEY: "tenant-api-key",
+  CPK_INTELLIGENCE_API_KEY: "tenant-api-key",
   COPILOTKIT_LICENSE_TOKEN: "license-token",
   MANAGED_AGENT_AG_UI_URL: " http://localhost:4200/ag-ui ",
   MANAGED_AGENT_TOKEN: "managed-agent-token",
@@ -82,13 +82,37 @@ describe("deployment configuration", () => {
     expect(config.tenantPackageDirectory).toBe("../examples/fintech");
   });
 
+  test("accepts the legacy Intelligence key name", () => {
+    const environment: Record<string, string | undefined> = {
+      ...baseEnvironment,
+      INTELLIGENCE_API_KEY: "legacy-api-key",
+    };
+    delete environment.CPK_INTELLIGENCE_API_KEY;
+
+    expect(loadConfig(environment).runtime).toMatchObject({
+      intelligence: { apiKey: "legacy-api-key" },
+    });
+  });
+
+  test("prefers the current CLI key when both Intelligence key names are set", () => {
+    const config = loadConfig({
+      ...baseEnvironment,
+      INTELLIGENCE_API_KEY: "stale-dashboard-key",
+      CPK_INTELLIGENCE_API_KEY: "current-cli-key",
+    });
+
+    expect(config.runtime).toMatchObject({
+      intelligence: { apiKey: "current-cli-key" },
+    });
+  });
+
   test("allows deployment without an authentication provider, when asked to", () => {
     const config = loadConfig({
       DATABASE_URL: baseEnvironment.DATABASE_URL,
       KEY_ENCRYPTION_KEY: baseEnvironment.KEY_ENCRYPTION_KEY,
       INTELLIGENCE_API_URL: baseEnvironment.INTELLIGENCE_API_URL,
       INTELLIGENCE_GATEWAY_WS_URL: baseEnvironment.INTELLIGENCE_GATEWAY_WS_URL,
-      INTELLIGENCE_API_KEY: baseEnvironment.INTELLIGENCE_API_KEY,
+      CPK_INTELLIGENCE_API_KEY: baseEnvironment.CPK_INTELLIGENCE_API_KEY,
       MANAGED_AGENT_AG_UI_URL: baseEnvironment.MANAGED_AGENT_AG_UI_URL,
       MANAGED_AGENT_TOKEN: baseEnvironment.MANAGED_AGENT_TOKEN,
       // Explicit, because no provider means every visitor is the administrator and a deployment has
@@ -105,7 +129,7 @@ describe("deployment configuration", () => {
   test.each([
     "INTELLIGENCE_API_URL",
     "INTELLIGENCE_GATEWAY_WS_URL",
-    "INTELLIGENCE_API_KEY",
+    "CPK_INTELLIGENCE_API_KEY",
   ])("refuses to start when %s is missing", (name) => {
     const environment: Record<string, string | undefined> = {
       ...baseEnvironment,
@@ -130,7 +154,7 @@ describe("deployment configuration", () => {
     }
     expect(config.runtime.intelligence.licenseToken).toBeUndefined();
     expect(config.runtime.intelligence.apiKey).toBe(
-      baseEnvironment.INTELLIGENCE_API_KEY,
+      baseEnvironment.CPK_INTELLIGENCE_API_KEY,
     );
   });
 
